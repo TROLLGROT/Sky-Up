@@ -20,7 +20,7 @@ Offline Android sky viewer. Point the phone at the sky; the view follows the And
 - Checks the night/day UI state once per minute instead of recalculating the Sun position every second.
 - The compass reset now shows a figure-eight calibration guide, tracks movement across orientation axes, and gives a short vibration when the movement check completes. Android still owns the physical sensor calibration; this UI does not directly recalibrate hardware.
 - Updates the launcher artwork to the supplied Sky Up logo for legacy and adaptive launcher icons.
-- Keeps the ground and realistic daylight sky off by default, and caps sensor-driven scene redraws at about 30 frames per second to reduce rendering work.
+- Keeps the ground and realistic daylight sky off by default, and caps sensor-driven scene redraws at about 60 frames per second while coalescing sensor, dwell-selection, and zoom invalidations.
 
 ## Build an APK automatically with GitHub Actions
 

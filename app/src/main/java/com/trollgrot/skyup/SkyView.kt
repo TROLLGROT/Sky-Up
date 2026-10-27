@@ -32,6 +32,9 @@ class SkyView(ctx: Context) : View(ctx) {
     fun now() = System.currentTimeMillis() + timeOffset
     private var traceName: String? = null
     private var traceJd = 0.0
+    private var traceLat = Double.NaN
+    private var traceLon = Double.NaN
+    private var traceDecl = Double.NaN
     private val trace = ArrayList<DoubleArray>()
     private val traceLabels = ArrayList<String?>()
     private val tracePath = Path()
@@ -68,7 +71,7 @@ class SkyView(ctx: Context) : View(ctx) {
     private data class Hit(var body: Body, var x: Float, var y: Float)
     private val hits = ArrayList<Hit>()
     private var hitCount = 0
-    private val frameIntervalMs = 33L
+    private val frameIntervalMs = 16L
     private var lastFrameRequestAt = 0L
     private var frameRequestQueued = false
     private val queuedFrameRequest = Runnable {
@@ -785,27 +788,41 @@ class SkyView(ctx: Context) : View(ctx) {
 
     private fun drawTrace(c: Canvas, f: Float, jd: Double, bodies: List<Body>) {
         val name = selected ?: return
-        if (traceName != name || abs(jd - traceJd) > 0.03) {
-            traceName = name; traceJd = jd; trace.clear(); traceLabels.clear()
+        if (traceName != name || abs(jd - traceJd) > 0.03 || traceLat != lat || traceLon != lon || traceDecl != decl) {
+            traceName = name; traceJd = jd; traceLat = lat; traceLon = lon; traceDecl = decl
+            trace.clear(); traceLabels.clear()
             val star = Astro.starByName(jd, name)
-            // Twenty-minute samples are smooth enough for a day-long path and avoid
-            // hundreds of repeated planetary ephemeris calculations after selection.
-            for (k in 0..72) {
-                val j = jd + k * 20.0 / 1440
+            // Stars repeat their apparent sky path after one sidereal day; solar-system
+            // objects use 24 hours. Twenty-minute samples keep the curve smooth
+            // without doing hundreds of planetary calculations after a selection.
+            val steps = 72
+            val spanDays = if (star != null) 0.9972695663 else 1.0
+            for (k in 0..steps) {
+                val j = jd + spanDays * k / steps
                 val b = star ?: Astro.all(j, false).firstOrNull { it.name == name } ?: return
-                val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, j); trace.add(doubleArrayOf(alt, az))
-                traceLabels.add(if (k % 3 == 0) timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong())) else null)
+                val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, j)
+                val azRad = Math.toRadians(az - decl); val altRad = Math.toRadians(alt)
+                trace.add(doubleArrayOf(cos(altRad) * sin(azRad), cos(altRad) * cos(azRad), sin(altRad)))
+                traceLabels.add(if (k > 0 && k < steps && k % 18 == 0) timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong())) else null)
             }
         }
         tracePath.rewind()
         var prevOk = false
+        val r = rot; val cx = width / 2f; val cy = height / 2f; val k2 = 2.0 * f
         for (k in trace.indices) {
             val t = trace[k]
-            if (!projectAzAltInto(t[1], t[0], f, quadCoords, 0)) { prevOk = false; continue }
-            val x = quadCoords[0]; val y = quadCoords[1]
+            val dx = r[0] * t[0] + r[3] * t[1] + r[6] * t[2]
+            val dy = r[1] * t[0] + r[4] * t[1] + r[7] * t[2]
+            val dz = r[2] * t[0] + r[5] * t[1] + r[8] * t[2]
+            val den = 1.0 - dz
+            if (den < 0.4) { prevOk = false; continue }
+            val scale = k2 / den
+            val x = (cx + scale * dx).toFloat(); val y = (cy - scale * dy).toFloat()
             if (prevOk) tracePath.lineTo(x, y) else tracePath.moveTo(x, y)
-            if (k % 3 == 0) {
-                val a = if (t[0] < 0) 110 else 230
+            // Hourly markers; label only every six hours. Leave the final sample
+            // unlabeled and undotted so it cannot duplicate the starting timestamp.
+            if (k < trace.lastIndex && k % 3 == 0) {
+                val a = 230
                 p.style = Paint.Style.FILL; p.color = withAlpha(0xFF9BE7FF.toInt(), a)
                 c.drawCircle(x, y, 3.2f * dp, p)
                 textPaint.textSize = 10f * dp; textPaint.color = withAlpha(0xFFD8F3FF.toInt(), a)
