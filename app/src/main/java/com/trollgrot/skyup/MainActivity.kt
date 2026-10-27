@@ -20,6 +20,7 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
@@ -51,7 +52,13 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         window.statusBarColor = 0xFF06152B.toInt()
         window.navigationBarColor = 0xFF06152B.toInt()
 
+        L.ru = prefs.getString("lang", "ru") == "ru"
+        Catalog.load(this)
         sky = SkyView(this).apply {
+            showConstellations = prefs.getBoolean("cons", true); showConNames = prefs.getBoolean("conNames", true)
+            showGround = prefs.getBoolean("ground", true); showGrid = prefs.getBoolean("grid", false)
+            daylightSky = prefs.getBoolean("day", true); nightMode = prefs.getBoolean("night", false)
+            starLimit = prefs.getFloat("starLimit", 5.5f).toDouble()
             drawStarNames = prefs.getBoolean("star_names", true)
             drawPlanetNames = prefs.getBoolean("planet_names", true)
             drawPlanetDetails = prefs.getBoolean("planet_details", true)
@@ -77,6 +84,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         })
 
         root.addView(makeTopBar(), FrameLayout.LayoutParams(-1, dp(68), Gravity.TOP))
+        root.addView(makeTimeBar(), FrameLayout.LayoutParams(-2, dp(42), Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(72) })
         root.addView(makeZoomControls(), FrameLayout.LayoutParams(dp(48), dp(112), Gravity.END or Gravity.CENTER_VERTICAL).apply {
             marginEnd = dp(12)
         })
@@ -191,7 +199,39 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         sky.clearSelection()
         sky.lowAccuracy = false
         sky.invalidate()
-        Toast.makeText(this, "Compass reset. Slowly move the phone in a figure‑8.", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, L.t("Compass reset. Slowly move the phone in a figure‑8.", "Компас сброшен. Медленно опишите телефоном восьмёрку."), Toast.LENGTH_LONG).show()
+    }
+
+    private fun makeTimeBar(): View {
+        val fmt = java.text.SimpleDateFormat("d MMM yyyy  HH:mm", if (L.ru) java.util.Locale("ru") else java.util.Locale.ENGLISH)
+        val bar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(6), 0, dp(6), 0); background = roundedGradient(0xE60A2347.toInt(), 0xE61C5A91.toInt(), 21) }
+        fun chip(t: String, click: () -> Unit) = TextView(this).apply { text = t; setTextColor(Color.WHITE); textSize = 15f; gravity = Gravity.CENTER; setPadding(dp(10), 0, dp(10), 0); setOnClickListener { click() } }
+        val label = chip("") { pickDateTime() }.apply { textSize = 13f }
+        bar.addView(chip("🔍") { showSearch() }, LinearLayout.LayoutParams(-2, -1))
+        bar.addView(chip("⟳") { sky.timeOffset = 0L; sky.invalidate() }, LinearLayout.LayoutParams(-2, -1))
+        bar.addView(chip("−1" + L.t("h", "ч")) { sky.timeOffset -= 3600000L; sky.invalidate() }, LinearLayout.LayoutParams(-2, -1))
+        bar.addView(label, LinearLayout.LayoutParams(-2, -1))
+        bar.addView(chip("+1" + L.t("h", "ч")) { sky.timeOffset += 3600000L; sky.invalidate() }, LinearLayout.LayoutParams(-2, -1))
+        val h = android.os.Handler(android.os.Looper.getMainLooper())
+        h.post(object : Runnable { override fun run() { label.text = fmt.format(java.util.Date(sky.now())); h.postDelayed(this, 1000) } })
+        return bar
+    }
+
+    private fun pickDateTime() {
+        val c = java.util.Calendar.getInstance().apply { timeInMillis = sky.now() }
+        android.app.DatePickerDialog(this, { _, y, m, d ->
+            c.set(y, m, d)
+            android.app.TimePickerDialog(this, { _, hh, mm ->
+                c.set(java.util.Calendar.HOUR_OF_DAY, hh); c.set(java.util.Calendar.MINUTE, mm)
+                sky.timeOffset = c.timeInMillis - System.currentTimeMillis(); sky.invalidate()
+            }, c.get(java.util.Calendar.HOUR_OF_DAY), c.get(java.util.Calendar.MINUTE), true).show()
+        }, c.get(java.util.Calendar.YEAR), c.get(java.util.Calendar.MONTH), c.get(java.util.Calendar.DAY_OF_MONTH)).show()
+    }
+
+    private fun showSearch() {
+        val names = (listOf("Sun", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune") + Catalog.named).distinct()
+        android.app.AlertDialog.Builder(this).setTitle(L.t("Find object", "Найти объект"))
+            .setItems(names.map { L.name(it) }.toTypedArray()) { _, i -> sky.select(names[i]) }.show()
     }
 
     private fun makeTopBar(): View {
@@ -212,7 +252,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
         val subtitle = TextView(this).apply {
-            text = "LIVE SKY MAP"
+            text = L.t("LIVE SKY MAP", "КАРТА НЕБА")
             setTextColor(paleBlue)
             textSize = 9f
             letterSpacing = 0.18f
@@ -225,7 +265,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         bar.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
         val settings = Button(this).apply {
-            text = "⚙  SETTINGS"
+            text = L.t("⚙  SETTINGS", "⚙  НАСТРОЙКИ")
             textSize = 12f
             isAllCaps = false
             setTextColor(Color.WHITE)
@@ -295,12 +335,12 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         header.addView(close, LinearLayout.LayoutParams(dp(42), dp(42)))
         panel.addView(header)
-        panel.addView(sectionLabel("DISPLAY"), topMargin())
+        panel.addView(sectionLabel(L.t("DISPLAY", "ЭКРАН")), topMargin())
 
         fovValue = TextView(this).apply {
             setTextColor(paleBlue)
             textSize = 13f
-            text = "Field of view: ${sky.fovDeg.toInt()}°"
+            text = L.t("Field of view: ", "Поле зрения: ") + "${sky.fovDeg.toInt()}°"
         }
         panel.addView(fovValue, topMargin())
         val fovSeek = SeekBar(this).apply {
@@ -311,7 +351,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     sky.setFieldOfView((progress + 5).toDouble())
-                    fovValue.text = "Field of view: ${sky.fovDeg.toInt()}°"
+                    fovValue.text = L.t("Field of view: ", "Поле зрения: ") + "${sky.fovDeg.toInt()}°"
                     prefs.edit().putFloat("fov", sky.fovDeg.toFloat()).apply()
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) { }
@@ -320,33 +360,59 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         panel.addView(fovSeek, topMargin())
 
-        panel.addView(sectionLabel("SKY APPEARANCE"), topMargin())
-        addSettingSwitch(panel, "Star names", sky.drawStarNames) { value ->
+        panel.addView(sectionLabel(L.t("SKY APPEARANCE", "ВИД НЕБА")), topMargin())
+        addSettingSwitch(panel, L.t("Star names", "Названия звёзд"), sky.drawStarNames) { value ->
             sky.drawStarNames = value
             prefs.edit().putBoolean("star_names", value).apply()
             sky.invalidate()
         }
-        addSettingSwitch(panel, "Planet names", sky.drawPlanetNames) { value ->
+        addSettingSwitch(panel, L.t("Planet names", "Названия планет"), sky.drawPlanetNames) { value ->
             sky.drawPlanetNames = value
             prefs.edit().putBoolean("planet_names", value).apply()
             sky.invalidate()
         }
-        addSettingSwitch(panel, "Detailed planet surfaces", sky.drawPlanetDetails) { value ->
+        addSettingSwitch(panel, L.t("Detailed planet surfaces", "Детальные поверхности планет"), sky.drawPlanetDetails) { value ->
             sky.drawPlanetDetails = value
             prefs.edit().putBoolean("planet_details", value).apply()
             sky.invalidate()
         }
 
-        panel.addView(sectionLabel("COMPASS"), topMargin())
+        fun sw(key: String, en: String, ru: String, def: Boolean, set: (Boolean) -> Unit) = addSettingSwitch(panel, L.t(en, ru), prefs.getBoolean(key, def)) { v -> set(v); prefs.edit().putBoolean(key, v).apply(); sky.invalidate() }
+        sw("cons", "Constellation lines", "Линии созвездий", true) { sky.showConstellations = it }
+        sw("conNames", "Constellation names", "Названия созвездий", true) { sky.showConNames = it }
+        sw("ground", "Horizon and ground", "Горизонт и земля", true) { sky.showGround = it }
+        sw("grid", "Altitude/azimuth grid", "Сетка высота/азимут", false) { sky.showGrid = it }
+        sw("day", "Realistic daylight sky", "Реалистичное дневное небо", true) { sky.daylightSky = it }
+        sw("night", "Night (red) mode", "Ночной (красный) режим", false) { sky.nightMode = it }
+        val starTxt = TextView(this).apply { setTextColor(paleBlue); textSize = 13f; text = L.t("Faintest star shown: ", "Самая слабая звезда: ") + "%.1f".format(sky.starLimit) }
+        panel.addView(starTxt, topMargin())
+        panel.addView(SeekBar(this).apply {
+            max = 35; progress = ((sky.starLimit - 2) * 10).toInt().coerceIn(0, 35)
+            progressTintList = android.content.res.ColorStateList.valueOf(lightBlue); thumbTintList = android.content.res.ColorStateList.valueOf(paleBlue)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, v: Int, u: Boolean) { sky.starLimit = 2.0 + v / 10.0; starTxt.text = L.t("Faintest star shown: ", "Самая слабая звезда: ") + "%.1f".format(sky.starLimit); prefs.edit().putFloat("starLimit", sky.starLimit.toFloat()).apply(); sky.invalidate() }
+                override fun onStartTrackingTouch(sb: SeekBar?) { }
+                override fun onStopTrackingTouch(sb: SeekBar?) { }
+            })
+        }, topMargin())
+        panel.addView(sectionLabel(L.t("LANGUAGE", "ЯЗЫК")), topMargin())
+        val langRow = LinearLayout(this)
+        for ((code, label) in listOf("ru" to "Русский", "en" to "English")) langRow.addView(Button(this).apply {
+            text = label; isAllCaps = false; setTextColor(Color.WHITE)
+            background = roundedGradient(if ((code == "ru") == L.ru) 0xFF1478B9.toInt() else 0xFF153D69.toInt(), if ((code == "ru") == L.ru) 0xFF48A7E4.toInt() else 0xFF205B8C.toInt(), 18)
+            setOnClickListener { prefs.edit().putString("lang", code).apply(); recreate() }
+        }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(6) })
+        panel.addView(langRow, topMargin())
+        panel.addView(sectionLabel(L.t("COMPASS", "КОМПАС")), topMargin())
         val hint = TextView(this).apply {
-            text = "Recalibrate when the compass feels inaccurate. Move the phone slowly in a figure‑8 after resetting."
+            text = L.t("Recalibrate when the compass feels inaccurate. Move the phone slowly in a figure‑8 after resetting.", "Если компас врёт — нажмите и медленно опишите телефоном восьмёрку.")
             setTextColor(0xFFD7ECFF.toInt())
             textSize = 12f
             setLineSpacing(dp(2).toFloat(), 1f)
         }
         panel.addView(hint, topMargin())
         val recalibrate = Button(this).apply {
-            text = "⟳   RECALIBRATE COMPASS"
+            text = L.t("⟳   RECALIBRATE COMPASS", "⟳   ПЕРЕКАЛИБРОВАТЬ КОМПАС")
             isAllCaps = false
             textSize = 13f
             setTextColor(Color.WHITE)
@@ -356,7 +422,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         panel.addView(recalibrate, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
 
         val reset = Button(this).apply {
-            text = "RESET ZOOM"
+            text = L.t("RESET ZOOM", "СБРОС МАСШТАБА")
             isAllCaps = false
             textSize = 12f
             setTextColor(paleBlue)
@@ -368,7 +434,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         panel.addView(reset, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(8) })
 
-        overlay.addView(panel, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply {
+        overlay.addView(ScrollView(this).apply { addView(panel) }, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply {
             setMargins(dp(22), dp(20), dp(22), dp(20))
         })
         return overlay

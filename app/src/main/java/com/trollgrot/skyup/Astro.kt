@@ -1,7 +1,7 @@
 package com.trollgrot.skyup
 import kotlin.math.*
 
-class Body(val name: String, val type: String, val ra: Double, val dec: Double, val mag: Double, val dist: String = "")
+class Body(val name: String, val type: String, val ra: Double, val dec: Double, val mag: Double, val dist: String = "", val bv: Double = 0.6)
 
 /** Fully offline astronomy: JPL "Approximate Positions of the Planets" (Keplerian elements, 1800-2050). */
 object Astro {
@@ -62,7 +62,7 @@ object Astro {
         STARS.split(";").map { val p = it.split(","); Body(p[0], "Star", p[1].toDouble() * 15, p[2].toDouble(), p[3].toDouble()) }
     }
 
-    fun all(jd: Double): List<Body> {
+    fun all(jd: Double, withStars: Boolean = true): List<Body> {
         val T = (jd - 2451545.0) / 36525.0
         val d = jd - 2451545.0
         val out = ArrayList<Body>()
@@ -88,7 +88,7 @@ object Astro {
             val (pr, pd) = precess(r, de, jd)
             out.add(Body(NAMES[i], "Planet", pr, pd, MAGS[i], "Distance from Earth %.3f AU".format(sqrt(x * x + y * y + z * z))))
         }
-        for (s in starList) { val (r, de) = precess(s.ra, s.dec, jd); out.add(Body(s.name, s.type, r, de, s.mag)) }
+        if (withStars) for (s in (if (Catalog.stars.isNotEmpty()) Catalog.stars else starList)) { val (r, de) = precess(s.ra, s.dec, jd); out.add(Body(s.name, s.type, r, de, s.mag, "", s.bv)) }
         return out
     }
 
