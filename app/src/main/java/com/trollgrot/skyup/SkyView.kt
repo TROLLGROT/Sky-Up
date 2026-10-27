@@ -72,25 +72,9 @@ class SkyView(ctx: Context) : View(ctx) {
     private data class Hit(var body: Body, var x: Float, var y: Float)
     private val hits = ArrayList<Hit>()
     private var hitCount = 0
-    private val frameIntervalMs = 16L
-    private var lastFrameRequestAt = 0L
-    private var frameRequestQueued = false
-    private val queuedFrameRequest = Runnable {
-        frameRequestQueued = false
-        lastFrameRequestAt = android.os.SystemClock.uptimeMillis()
-        postInvalidateOnAnimation()
-    }
-    fun requestFrame() {
-        val now = android.os.SystemClock.uptimeMillis()
-        val delay = frameIntervalMs - (now - lastFrameRequestAt)
-        if (delay <= 0L) {
-            lastFrameRequestAt = now
-            postInvalidateOnAnimation()
-        } else if (!frameRequestQueued) {
-            frameRequestQueued = true
-            postDelayed(queuedFrameRequest, delay)
-        }
-    }
+    // Choreographer already coalesces sensor updates to the next display frame.
+    // An extra 16 ms timer can land just after vsync and halve the effective FPS.
+    fun requestFrame() = postInvalidateOnAnimation()
     private fun addHit(body: Body, x: Float, y: Float) {
         if (hitCount == hits.size) hits.add(Hit(body, x, y))
         else hits[hitCount].apply { this.body = body; this.x = x; this.y = y }
@@ -794,8 +778,8 @@ class SkyView(ctx: Context) : View(ctx) {
     private fun drawTrace(c: Canvas, f: Float, jd: Double, bodies: List<Body>) {
         val name = selected ?: return
         if (traceName != name || abs(jd - traceJd) > 0.03 || traceLat != lat || traceLon != lon || traceDecl != decl) {
-            traceName = name; traceJd = jd; traceLat = lat; traceLon = lon; traceDecl = decl
-            trace.clear(); traceLabels.clear()
+            val newTrace = ArrayList<DoubleArray>(289)
+            val newLabels = ArrayList<String?>(289)
             val star = Astro.starByName(jd, name)
             // Stars repeat their apparent sky path after one sidereal day; solar-system
             // objects use 24 hours. Five-minute samples keep the apparent sky path smooth.
@@ -805,32 +789,29 @@ class SkyView(ctx: Context) : View(ctx) {
                 val j = jd + spanDays * k / steps
                 val b = star ?: Astro.bodyAt(j, name) ?: return
                 val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, j)
-                val azRad = Math.toRadians(az - decl); val altRad = Math.toRadians(alt)
-                trace.add(doubleArrayOf(cos(altRad) * sin(azRad), cos(altRad) * cos(azRad), sin(altRad)))
-                traceLabels.add(if (k > 0 && k < steps && k % 72 == 0) timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong())) else null)
+                newTrace.add(doubleArrayOf(alt, az))
+                newLabels.add(if (k > 0 && k < steps && k % 72 == 0) timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong())) else null)
             }
+            trace.clear(); trace.addAll(newTrace)
+            traceLabels.clear(); traceLabels.addAll(newLabels)
+            traceName = name; traceJd = jd; traceLat = lat; traceLon = lon; traceDecl = decl
         }
         tracePath.rewind()
         var prevOk = false
-        val r = frameRot; val cx = width / 2f; val cy = height / 2f; val k2 = 2.0 * f
         for (k in trace.indices) {
             val t = trace[k]
-            val dx = r[0] * t[0] + r[3] * t[1] + r[6] * t[2]
-            val dy = r[1] * t[0] + r[4] * t[1] + r[7] * t[2]
-            val dz = r[2] * t[0] + r[5] * t[1] + r[8] * t[2]
-            val den = 1.0 - dz
-            if (den < 0.4) { prevOk = false; continue }
-            val scale = k2 / den
-            val x = (cx + scale * dx).toFloat(); val y = (cy - scale * dy).toFloat()
-            if (prevOk) tracePath.lineTo(x, y) else tracePath.moveTo(x, y)
+            // Use the same azimuth/altitude projection as every other sky layer.
+            val point = projectAzAlt(t[1], t[0], f)
+            if (point == null) { prevOk = false; continue }
+            if (prevOk) tracePath.lineTo(point.x, point.y) else tracePath.moveTo(point.x, point.y)
             // Hourly markers; label only every six hours. Leave the final sample
             // unlabeled and undotted so it cannot duplicate the starting timestamp.
             if (k < trace.lastIndex && k % 12 == 0) {
                 val a = 230
                 p.style = Paint.Style.FILL; p.color = withAlpha(0xFF9BE7FF.toInt(), a)
-                c.drawCircle(x, y, 3.2f * dp, p)
+                c.drawCircle(point.x, point.y, 3.2f * dp, p)
                 textPaint.textSize = 10f * dp; textPaint.color = withAlpha(0xFFD8F3FF.toInt(), a)
-                traceLabels[k]?.let { c.drawText(it, x + 6 * dp, y - 6 * dp, textPaint) }
+                traceLabels[k]?.let { c.drawText(it, point.x + 6 * dp, point.y - 6 * dp, textPaint) }
             }
             prevOk = true
         }

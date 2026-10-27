@@ -30,7 +30,6 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.acos
-import kotlin.math.sqrt
 
 class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var sky: SkyView
@@ -47,7 +46,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var calibrationAction: Button
 
     private val q = FloatArray(4)
-    private val qVector = FloatArray(4)
     private val calibrationPreviousQ = FloatArray(4)
     private val calibrationAngles = FloatArray(3)
     private var calibrationActive = false
@@ -63,16 +61,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private var calibrationPitchMax = Double.NEGATIVE_INFINITY
     private var calibrationRollMin = Double.POSITIVE_INFINITY
     private var calibrationRollMax = Double.NEGATIVE_INFINITY
-    private val n = FloatArray(4)
-    private var hasQuaternion = false
     private val rot = FloatArray(9)
     private val rg = FloatArray(9)
-    private val rm = FloatArray(9)
-    private var useGame = false
-    private var haveMag = false
-    private var psi = 0.0
-    private var psiN = 0
-    private var magAcc = 3
     private var night = false
 
     private val prefs by lazy { getSharedPreferences("sky", MODE_PRIVATE) }
@@ -150,12 +140,12 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     override fun onResume() {
         super.onResume()
-        val game = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
-        val mag = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-        useGame = game != null && mag != null
-        // gyro-driven (smooth, no drift in short term) + slow magnetic heading correction
-        if (useGame) { sm.registerListener(this, game, SENSOR_PERIOD_US); sm.registerListener(this, mag, SensorManager.SENSOR_DELAY_UI) }
-        else if (mag != null) sm.registerListener(this, mag, SENSOR_PERIOD_US)
+        // Android's fused rotation vector already combines gyro, accelerometer and
+        // magnetic heading. Avoid layering a second quaternion filter and custom yaw
+        // correction over it: that adds latency and can produce visible compass jumps.
+        val orientation = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+            ?: sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+        orientation?.let { sm.registerListener(this, it, SENSOR_PERIOD_US) }
         startLocation()
     }
 
@@ -214,51 +204,16 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     override fun onProviderDisabled(provider: String) { }
 
     override fun onSensorChanged(event: SensorEvent) {
-        if (useGame && event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) { SensorManager.getRotationMatrixFromVector(rm, event.values); haveMag = true; updatePsi(); return }
-        SensorManager.getQuaternionFromVector(n, event.values)
-        if (!hasQuaternion) {
-            n.copyInto(q)
-            hasQuaternion = true
-        } else {
-            var dot = n[0] * q[0] + n[1] * q[1] + n[2] * q[2] + n[3] * q[3]
-            if (dot < 0f) {
-                for (i in 0..3) n[i] = -n[i]
-                dot = -dot
-            }
-            val angle = 2f * acos(minOf(1f, dot))
-            val alpha = minOf(1f, 0.08f + angle * 4f)
-            for (i in 0..3) q[i] += alpha * (n[i] - q[i])
-            val length = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
-            if (length > 0f) for (i in 0..3) q[i] /= length
-        }
-        qVector[0] = q[1]; qVector[1] = q[2]; qVector[2] = q[3]; qVector[3] = q[0]
-        SensorManager.getRotationMatrixFromVector(rg, qVector)
+        if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR &&
+            event.sensor.type != Sensor.TYPE_GAME_ROTATION_VECTOR) return
+        SensorManager.getQuaternionFromVector(q, event.values)
+        SensorManager.getRotationMatrixFromVector(rot, event.values)
+        rot.copyInto(rg)
         trackCalibration(q)
-        if (useGame && haveMag && psiN > 0) applyPsi() else rg.copyInto(rot)
         // Publish an immutable snapshot; SkyView reads it while rendering on the UI thread.
         sky.rot = rot.copyOf()
-        // Share the frame limiter with dwell selection and pinch gestures.
+        // Let Android schedule one redraw at the next display vsync.
         sky.requestFrame()
-    }
-
-    private fun updatePsi() {
-        if (!hasQuaternion) return
-        var sx = 0.0; var sy = 0.0
-        for (i in 0..2) { val gx = rg[i].toDouble(); val gy = rg[3 + i].toDouble(); val mx = rm[i].toDouble(); val my = rm[3 + i].toDouble(); sx += gx * mx + gy * my; sy += gx * my - gy * mx }
-        val target = kotlin.math.atan2(sy, sx)
-        if (psiN == 0) psi = target else {
-            var d = target - psi
-            while (d > Math.PI) d -= 2 * Math.PI
-            while (d < -Math.PI) d += 2 * Math.PI
-            val k = (if (psiN < 150) 0.06 else 0.004) * (if (magAcc <= SensorManager.SENSOR_STATUS_ACCURACY_LOW) 0.25 else 1.0)
-            psi += k * d
-        }
-        psiN++
-    }
-
-    private fun applyPsi() {
-        val c = kotlin.math.cos(psi).toFloat(); val s = kotlin.math.sin(psi).toFloat()
-        for (j in 0..2) { rot[j] = c * rg[j] - s * rg[3 + j]; rot[3 + j] = s * rg[j] + c * rg[3 + j]; rot[6 + j] = rg[6 + j] }
     }
 
     private fun nightAt(la: Double, lo: Double, has: Boolean): Boolean {
@@ -271,7 +226,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private fun tone(c: Int): Int = if (!night) c else Color.argb(Color.alpha(c), (Color.red(c) * 0.34f).toInt(), (Color.green(c) * 0.36f).toInt(), (Color.blue(c) * 0.42f).toInt())
 
     override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {
-        if (sensor.type == Sensor.TYPE_ROTATION_VECTOR) magAcc = accuracy
         sky.lowAccuracy = accuracy <= SensorManager.SENSOR_STATUS_ACCURACY_LOW
         sky.invalidate()
     }
@@ -279,8 +233,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private fun recalibrateCompass() {
         // Android owns hardware compass calibration. The app resets its orientation filter,
         // then guides the user through a figure-eight and checks that the phone was actually moved.
-        hasQuaternion = false
-        psiN = 0
         calibrationActive = true
         calibrationHasPrevious = false
         calibrationStartedAt = android.os.SystemClock.elapsedRealtime()
