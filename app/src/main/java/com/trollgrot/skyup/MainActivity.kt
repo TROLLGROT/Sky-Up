@@ -626,7 +626,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                     val distance = kotlin.math.sqrt(random.nextDouble()) * radius * 0.92
                     val x = cx + kotlin.math.cos(angle).toFloat() * distance.toFloat()
                     val y = cy + kotlin.math.sin(angle).toFloat() * distance.toFloat()
-                    val size = (if (isRedGiant) 1.2 + random.nextDouble() * 6.0 else 0.7 + random.nextDouble() * 3.6) * dp
+                    val size = (if (isRedGiant) 1.2 + random.nextDouble() * 6.0 else 0.7 + random.nextDouble() * 3.6) * resources.displayMetrics.density.toDouble()
                     val alpha = 18 + random.nextInt(46)
                     val shade = if (random.nextBoolean()) core else halo
                     surfacePaint.color = (alpha shl 24) or (shade and 0x00FFFFFF)
