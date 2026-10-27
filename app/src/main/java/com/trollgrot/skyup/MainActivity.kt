@@ -199,8 +199,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         SensorManager.getRotationMatrixFromVector(rg, floatArrayOf(q[1], q[2], q[3], q[0]))
         if (useGame && haveMag && psiN > 0) applyPsi() else rg.copyInto(rot)
-        sky.rot = rot.copyOf()
-        sky.invalidate()
+        sky.rot = rot
+        sky.postInvalidateOnAnimation()
     }
 
     private fun updatePsi() {

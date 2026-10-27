@@ -31,7 +31,7 @@ object Catalog {
                 if (!name.startsWith("HIP")) nm.add(p[2].toDouble() to name)
                 s.add(Body(name, "Star", p[0].toDouble(), p[1].toDouble(), p[2].toDouble(), "", p[3].toDouble()))
             }
-            stars = s; named = nm.sortedBy { it.first }.map { it.second }.take(150)
+            stars = s.sortedBy { it.mag }; named = nm.sortedBy { it.first }.map { it.second }.take(150)
             lines = ctx.assets.open("lines.txt").bufferedReader().readLines().filter { it.isNotBlank() }.map { l -> l.trim().split(" ").map { it.toDouble() }.toDoubleArray() }
             cons = ctx.assets.open("cons.tsv").bufferedReader().readLines().mapNotNull { l -> val p = l.split("\t"); if (p.size < 4) null else Con(p[0].toDouble(), p[1].toDouble(), p[2], p[3]) }
         } catch (e: Exception) { }

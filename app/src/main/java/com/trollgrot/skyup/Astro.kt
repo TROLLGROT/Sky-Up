@@ -1,7 +1,11 @@
 package com.trollgrot.skyup
 import kotlin.math.*
 
-class Body(val name: String, val type: String, val ra: Double, val dec: Double, val mag: Double, val dist: String = "", val bv: Double = 0.6)
+class Body(val name: String, val type: String, val ra: Double, val dec: Double, val mag: Double, val dist: String = "", val bv: Double = 0.6) {
+    val vx = kotlin.math.cos(Math.toRadians(dec)) * kotlin.math.cos(Math.toRadians(ra))
+    val vy = kotlin.math.cos(Math.toRadians(dec)) * kotlin.math.sin(Math.toRadians(ra))
+    val vz = kotlin.math.sin(Math.toRadians(dec))
+}
 
 /** Fully offline astronomy: JPL "Approximate Positions of the Planets" (Keplerian elements, 1800-2050). */
 object Astro {
@@ -64,12 +68,19 @@ object Astro {
 
     private var starCache: List<Body>? = null
     private var starCacheJd = 0.0
+    private var starMap: HashMap<String, Body>? = null
+    fun stars(jd: Double): List<Body> = precessedStars(jd)
+    fun starByName(jd: Double, name: String): Body? {
+        val l = precessedStars(jd); var m = starMap
+        if (m == null) { m = HashMap(); for (b in l) m.putIfAbsent(b.name, b); starMap = m }
+        return m[name]
+    }
     private fun precessedStars(jd: Double): List<Body> {
         val c = starCache
         if (c != null && abs(jd - starCacheJd) < 2.0) return c
         val src = if (Catalog.stars.isNotEmpty()) Catalog.stars else starList
         val l = src.map { s -> val (r, de) = precess(s.ra, s.dec, jd); Body(s.name, s.type, r, de, s.mag, "", s.bv) }
-        starCache = l; starCacheJd = jd; return l
+        starCache = l; starCacheJd = jd; starMap = null; return l
     }
 
     fun all(jd: Double, withStars: Boolean = true): List<Body> {

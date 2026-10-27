@@ -111,27 +111,29 @@ class SkyView(ctx: Context) : View(ctx) {
 
         val focal = ((height / 2.0) / (2 * tan(Math.toRadians(fovDeg / 4.0)))).toFloat()
         val julianDay = Astro.jd(now())
+        prepMatrix(julianDay)
         fun project(ra: Double, dec: Double): Projected? {
             val (altitude, azimuth) = Astro.altAz(ra, dec, lat, lon, julianDay)
             return projectAzAlt(azimuth, altitude, focal)
         }
 
-        val bodies = Astro.all(julianDay)
+        val bodies = Astro.all(julianDay, false)
         val sunAlt = bodies.first { it.name == "Sun" }.let { Astro.altAz(it.ra, it.dec, lat, lon, julianDay).first }
         val day = if (daylightSky) ((sunAlt + 12) / 12).coerceIn(0.0, 1.0).toFloat() else 0f
         val twi = if (daylightSky) (1 - abs(sunAlt + 5) / 11).coerceIn(0.0, 1.0).toFloat() else 0f
         val starFade = 1f - day * 0.97f
         if (day > 0f) canvas.drawColor(withAlpha(0xFF3A78B8.toInt(), (235 * day).toInt()))
         val haze = lerpC(lerpC(0xFF1B3A6B.toInt(), 0xFF9CC8F0.toInt(), day), 0xFFFF8A3C.toInt(), twi * 0.8f)
-        for (i in 0 until 14) fillBand(canvas, focal, i * 2.0 + 2, i * 2.0, withAlpha(haze, (130 * (1 - i / 14f) * (1 - i / 14f)).toInt()))
+        for (i in 0 until 8) fillBand(canvas, focal, i * 3.5 + 3.5, i * 3.5, withAlpha(haze, (130 * (1 - i / 8f) * (1 - i / 8f)).toInt()))
         if (Catalog.stars.isEmpty()) drawBackgroundStars(canvas, ::project)
         if (showGrid) drawGrid(canvas, focal)
-        if (showConstellations) drawConstellations(canvas, julianDay, day, ::project)
+        if (showConstellations) drawConstellations(canvas, julianDay, day, focal, ::project)
         drawHorizonAndEcliptic(canvas, focal, julianDay, ::project)
         drawCardinalPoints(canvas, focal)
 
         hits.clear()
         val zoom = (ln(MAX_FOV / fovDeg) / ln(12.0)).coerceIn(0.0, 1.0).toFloat()
+        drawStars(canvas, julianDay, focal, zoom, starFade)
         for (body in bodies) {
             if (body.type == "Star" && body.mag > starLimit) continue
             val point = project(body.ra, body.dec) ?: continue
@@ -233,47 +235,105 @@ class SkyView(ctx: Context) : View(ctx) {
 
     private fun starRadius(magnitude: Double): Float = max(1.0f, 3.8f - magnitude.toFloat() * 0.72f) * dp
 
+    private val sprites = HashMap<Int, android.graphics.Bitmap>()
+    private val spritePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val srcR = android.graphics.Rect(0, 0, 128, 128)
+    private val dstR = RectF()
+    private fun sprite(color: Int): android.graphics.Bitmap = sprites.getOrPut(color) {
+        val bmp = android.graphics.Bitmap.createBitmap(128, 128, android.graphics.Bitmap.Config.ARGB_8888)
+        val cv = Canvas(bmp); val pp = Paint(Paint.ANTI_ALIAS_FLAG); val h = 64f; val core = h / 7f
+        pp.shader = RadialGradient(h, h, h, intArrayOf(withAlpha(color, 170), withAlpha(color, 70), withAlpha(color, 22), withAlpha(color, 0)), floatArrayOf(0f, 0.1f, 0.38f, 1f), Shader.TileMode.CLAMP)
+        cv.drawCircle(h, h, h, pp)
+        pp.shader = RadialGradient(h, h, core * 1.7f, intArrayOf(0xFFFFFFFF.toInt(), withAlpha(color, 220), withAlpha(color, 0)), floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP)
+        cv.drawCircle(h, h, core * 1.7f, pp)
+        bmp
+    }
+
     private fun glowPoint(c: Canvas, x: Float, y: Float, core: Float, color: Int, dim: Float, spikes: Boolean) {
         val big = core * 7f
-        p.style = Paint.Style.FILL
-        p.shader = RadialGradient(x, y, big, intArrayOf(withAlpha(color, (170 * dim).toInt()), withAlpha(color, (70 * dim).toInt()), withAlpha(color, (22 * dim).toInt()), withAlpha(color, 0)),
-            floatArrayOf(0f, 0.1f, 0.38f, 1f), Shader.TileMode.CLAMP)
-        c.drawCircle(x, y, big, p)
-        p.shader = RadialGradient(x, y, core * 1.7f, intArrayOf(withAlpha(0xFFFFFFFF.toInt(), (255 * dim).toInt()), withAlpha(color, (220 * dim).toInt()), withAlpha(color, 0)),
-            floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP)
-        c.drawCircle(x, y, core * 1.7f, p); p.shader = null
+        dstR.set(x - big, y - big, x + big, y + big); spritePaint.alpha = (255 * dim).toInt().coerceIn(0, 255)
+        c.drawBitmap(sprite(color), srcR, dstR, spritePaint)
         if (spikes) {
-            p.style = Paint.Style.STROKE; p.strokeWidth = 0.8f * dp; p.color = withAlpha(color, (110 * dim).toInt())
+            p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 0.8f * dp; p.color = withAlpha(color, (110 * dim).toInt())
             c.drawLine(x - core * 5f, y, x + core * 5f, y, p); c.drawLine(x, y - core * 5f, x, y + core * 5f, p); p.style = Paint.Style.FILL
         }
     }
 
-    private fun drawStar(canvas: Canvas, point: Projected, radius: Float, dim: Float, magnitude: Double, bv: Double = 0.6) {
-        val color = when { bv < 0.0 -> 0xFF9DBBFF; bv < 0.3 -> 0xFFC9DAFF; bv < 0.6 -> 0xFFF2F4FF; bv < 1.0 -> 0xFFFFE9B8; bv < 1.4 -> 0xFFFFC27A; else -> 0xFFFF9A62 }.toInt()
-        if (magnitude > 3.3) {
-            p.style = Paint.Style.FILL
-            p.color = withAlpha(color, ((60 + (6.6 - magnitude) * 48) * dim).toInt())
-            canvas.drawCircle(point.x, point.y, radius * 1.5f, p)
-            p.color = withAlpha(color, ((110 + (6.6 - magnitude) * 40) * dim).toInt())
-            canvas.drawCircle(point.x, point.y, radius * 0.8f, p)
-            return
-        }
-        glowPoint(canvas, point.x, point.y, radius * 0.75f, color, dim, magnitude < 0.6)
-    }
+    private fun bvColor(bv: Double): Int = when { bv < 0.0 -> 0xFF9DBBFF; bv < 0.3 -> 0xFFC9DAFF; bv < 0.6 -> 0xFFF2F4FF; bv < 1.0 -> 0xFFFFE9B8; bv < 1.4 -> 0xFFFFC27A; else -> 0xFFFF9A62 }.toInt()
+
+    private fun drawStar(canvas: Canvas, point: Projected, radius: Float, dim: Float, magnitude: Double, bv: Double = 0.6) =
+        glowPoint(canvas, point.x, point.y, radius * 0.75f, bvColor(bv), dim, magnitude < 0.6)
 
     private fun drawGlowPlanet(c: Canvas, b: Body, pt: Projected, dim: Float) {
         val col = when (b.name) { "Mercury" -> 0xFFE4E0D4; "Venus" -> 0xFFFFF0C8; "Mars" -> 0xFFFFA070; "Jupiter" -> 0xFFFFE2B8; "Saturn" -> 0xFFFFE9A8; "Uranus" -> 0xFFBFF4F8; else -> 0xFF9CBFFF }.toInt()
         glowPoint(c, pt.x, pt.y, min(5.6f, max(2.4f, 3.3f - b.mag.toFloat() * 0.35f)) * dp, col, dim, b.mag < -1.5)
     }
 
+    // ---- fast star pipeline: one 3x3 matrix per frame (equatorial -> device), no trig per star
+    private val M = DoubleArray(9)
+    private val Ueq = DoubleArray(3)
+    private fun prepMatrix(jd: Double) {
+        val th = Math.toRadians(Astro.norm(280.46061837 + 360.98564736629 * (jd - 2451545.0) + lon)); val ph = Math.toRadians(lat); val ps = Math.toRadians(decl)
+        val st = sin(th); val ct = cos(th); val sp = sin(ph); val cp = cos(ph); val sps = sin(ps); val cps = cos(ps)
+        val e = doubleArrayOf(-st, ct, 0.0); val n = doubleArrayOf(-ct * sp, -st * sp, cp); val up = doubleArrayOf(ct * cp, st * cp, sp)
+        for (i in 0..2) Ueq[i] = up[i]
+        val w0 = DoubleArray(3); val w1 = DoubleArray(3)
+        for (i in 0..2) { w0[i] = cps * e[i] - sps * n[i]; w1[i] = sps * e[i] + cps * n[i] }
+        val r = rot
+        for (i in 0..2) for (k in 0..2) M[i * 3 + k] = r[i] * w0[k] + r[3 + i] * w1[k] + r[6 + i] * up[k]
+    }
+
+    private var bufA = FloatArray(0); private var bufB = FloatArray(0); private var bufC = FloatArray(0)
+    private val ptPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeCap = Paint.Cap.ROUND; style = Paint.Style.STROKE }
+
+    private fun drawStars(c: Canvas, jd: Double, f: Float, zoom: Float, fade: Float) {
+        val st = Astro.stars(jd); if (st.isEmpty()) return
+        if (bufA.size < st.size * 2) { bufA = FloatArray(st.size * 2); bufB = FloatArray(st.size * 2); bufC = FloatArray(st.size * 2) }
+        var na = 0; var nb = 0; var nc = 0
+        val m = M; val u = Ueq; val w = width.toFloat(); val h = height.toFloat(); val cx = w / 2; val cy = h / 2; val k2 = 2.0 * f
+        val sel = selected
+        for (b in st) {
+            if (b.mag > starLimit) break
+            val den = 1 - (m[6] * b.vx + m[7] * b.vy + m[8] * b.vz)
+            if (den < 0.4) continue
+            val k = k2 / den
+            val x = (cx + k * (m[0] * b.vx + m[1] * b.vy + m[2] * b.vz)).toFloat(); val y = (cy - k * (m[3] * b.vx + m[4] * b.vy + m[5] * b.vz)).toFloat()
+            val isSel = sel != null && b.name == sel
+            if (!isSel && (x < -30f || x > w + 30f || y < -30f || y > h + 30f)) continue
+            val uu = u[0] * b.vx + u[1] * b.vy + u[2] * b.vz
+            if (showGround && uu < -0.035 && !isSel) continue
+            var dim = fade
+            if (uu < 0.035) dim *= (0.35 + 0.65 * ((Math.toDegrees(asin(uu.coerceIn(-1.0, 1.0))) + 1) / 2).coerceIn(0.0, 1.0)).toFloat()
+            if (dim < 0.02f) continue
+            val rad = starRadius(b.mag)
+            if (b.mag > 3.3) {
+                if (b.mag < 4.6) { bufA[na++] = x; bufA[na++] = y } else if (b.mag < 5.6) { bufB[nb++] = x; bufB[nb++] = y } else { bufC[nc++] = x; bufC[nc++] = y }
+            } else glowPoint(c, x, y, rad * 0.75f, bvColor(b.bv), dim, b.mag < 0.6)
+            if (b.mag < 1.7 + 2.5 * zoom && drawStarNames && !b.name.startsWith("HIP")) {
+                textPaint.style = Paint.Style.FILL; textPaint.textSize = 10.5f * dp; textPaint.color = 0xFFD3E5FF.toInt()
+                textPaint.setShadowLayer(4f * dp, 0f, 0f, 0xBB6DBBFF.toInt())
+                c.drawText(L.name(b.name), x + rad + 4f * dp, y - 2f * dp, textPaint); textPaint.clearShadowLayer()
+            }
+            if (b.mag <= 5.0 || isSel) hits.add(b to Projected(x, y, Math.toDegrees(asin(uu.coerceIn(-1.0, 1.0)))))
+            if (isSel) {
+                p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 1.8f * dp; p.color = 0xFF9BE7FF.toInt()
+                c.drawCircle(x, y, rad + 8f * dp, p); p.style = Paint.Style.FILL
+                if (System.currentTimeMillis() - lastInfo > 450) { lastInfo = System.currentTimeMillis(); onSelect?.invoke(info(b, jd)) }
+            }
+        }
+        ptPaint.color = withAlpha(0xFFDDE8FF.toInt(), (205 * fade).toInt()); ptPaint.strokeWidth = 2.6f * dp; c.drawPoints(bufA, 0, na, ptPaint)
+        ptPaint.color = withAlpha(0xFFDDE8FF.toInt(), (150 * fade).toInt()); ptPaint.strokeWidth = 2.1f * dp; c.drawPoints(bufB, 0, nb, ptPaint)
+        ptPaint.color = withAlpha(0xFFDDE8FF.toInt(), (105 * fade).toInt()); ptPaint.strokeWidth = 1.7f * dp; c.drawPoints(bufC, 0, nc, ptPaint)
+    }
+
     private var dwellName: String? = null
     private var dwellStart = 0L
     /** Hold the crosshair on an object for one second to select it. */
     private fun updateDwell(c: Canvas) {
-        val cx = width / 2f; val cy = height / 2f
-        val near = hits.filter { hypot(it.second.x - cx, it.second.y - cy) < 30f * dp }
-            .minByOrNull { hypot(it.second.x - cx, it.second.y - cy) - (if (it.first.mag < 2.5) 12f * dp else 0f) }
-        val nm = near?.first?.name; val t = System.currentTimeMillis()
+        val cx = width / 2f; val cy = height / 2f; val lim = 30f * dp
+        var best: Body? = null; var bs = Float.MAX_VALUE
+        for ((b, q) in hits) { val d = hypot(q.x - cx, q.y - cy); if (d > lim) continue; val sc = d - (if (b.mag < 2.5) 12f * dp else 0f); if (sc < bs) { bs = sc; best = b } }
+        val nm = best?.name; val t = System.currentTimeMillis()
         if (nm != dwellName) { dwellName = nm; dwellStart = t }
         if (nm != null && nm != selected) {
             val pr = ((t - dwellStart) / 1000f).coerceIn(0f, 1f)
@@ -519,7 +579,7 @@ class SkyView(ctx: Context) : View(ctx) {
 
     private fun fillBand(c: Canvas, f: Float, altTop: Double, altBot: Double, color: Int) {
         p.shader = null; p.style = Paint.Style.FILL_AND_STROKE; p.strokeWidth = 1.2f
-        for (az in 0 until 360 step 6) quadFill(c, f, az.toDouble(), altTop, az + 6.0, altTop, altBot, color)
+        for (az in 0 until 360 step 10) quadFill(c, f, az.toDouble(), altTop, az + 10.0, altTop, altBot, color)
         p.style = Paint.Style.FILL
     }
 
@@ -527,11 +587,11 @@ class SkyView(ctx: Context) : View(ctx) {
 
     private fun drawGround(c: Canvas, f: Float, day: Float) {
         val top = lerpC(0xFF0A1220.toInt(), 0xFF2A453D.toInt(), day); val deep = lerpC(0xFF02050A.toInt(), 0xFF101C1A.toInt(), day)
+        val mid1 = lerpC(top, deep, 0.35f); val mid2 = lerpC(top, deep, 0.7f)
         p.shader = null; p.style = Paint.Style.FILL_AND_STROKE; p.strokeWidth = 1.2f
-        for (az in 0 until 360 step 4) {
-            quadFill(c, f, az.toDouble(), skyline(az.toDouble()), az + 4.0, skyline(az + 4.0), -5.0, top)
-            for (k in 0 until 9) quadFill(c, f, az.toDouble(), -5.0 - k * 10, az + 4.0, -5.0 - k * 10, -15.0 - k * 10, lerpC(top, deep, min(1f, (k + 0.5f) / 3f)))
-        }
+        for (az in 0 until 360 step 4) quadFill(c, f, az.toDouble(), skyline(az.toDouble()), az + 4.0, skyline(az + 4.0), -5.0, top)
+        for (az in 0 until 360 step 10) { val a = az.toDouble()
+            quadFill(c, f, a, -5.0, a + 10, -5.0, -20.0, mid1); quadFill(c, f, a, -20.0, a + 10, -20.0, -45.0, mid2); quadFill(c, f, a, -45.0, a + 10, -45.0, -90.0, deep) }
         p.style = Paint.Style.FILL
     }
 
@@ -544,14 +604,34 @@ class SkyView(ctx: Context) : View(ctx) {
         p.style = Paint.Style.FILL
     }
 
-    private fun drawConstellations(c: Canvas, jd: Double, day: Float, project: (Double, Double) -> Projected?) {
+    private var lineVJd = -1e9
+    private var lineV: List<DoubleArray> = emptyList()
+
+    private fun drawConstellations(c: Canvas, jd: Double, day: Float, f: Float, project: (Double, Double) -> Projected?) {
+        if (abs(jd - lineVJd) > 2.0 || lineV.size != Catalog.lines.size) {
+            lineVJd = jd
+            lineV = Catalog.lines.map { ln ->
+                val o = DoubleArray(ln.size / 2 * 3); var i = 0; var k = 0
+                while (i + 1 < ln.size) {
+                    val (r, d) = Astro.precess(ln[i], ln[i + 1], jd); val rr = Math.toRadians(r); val dd = Math.toRadians(d)
+                    o[k++] = cos(dd) * cos(rr); o[k++] = cos(dd) * sin(rr); o[k++] = sin(dd); i += 2
+                }
+                o
+            }
+        }
         p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 1f * dp; p.color = withAlpha(0xFF7FB6E8.toInt(), (120 * (1 - day * 0.9f)).toInt())
-        for (ln in Catalog.lines) {
-            var pr: Projected? = null; var i = 0
-            while (i + 1 < ln.size) {
-                val (r, d) = Astro.precess(ln[i], ln[i + 1], jd); val q = project(r, d)
-                if (pr != null && q != null && !(showGround && (pr.alt < 0 || q.alt < 0))) c.drawLine(pr.x, pr.y, q.x, q.y, p)
-                pr = q; i += 2
+        val m = M; val u = Ueq; val w = width.toFloat(); val h = height.toFloat(); val cx = w / 2; val cy = h / 2; val k2 = 2.0 * f
+        for (ln in lineV) {
+            var px = 0f; var py = 0f; var pUp = 0.0; var pOk = false; var i = 0
+            while (i + 2 < ln.size) {
+                val vx = ln[i]; val vy = ln[i + 1]; val vz = ln[i + 2]; i += 3
+                val den = 1 - (m[6] * vx + m[7] * vy + m[8] * vz)
+                if (den < 0.4) { pOk = false; continue }
+                val k = k2 / den
+                val x = (cx + k * (m[0] * vx + m[1] * vy + m[2] * vz)).toFloat(); val y = (cy - k * (m[3] * vx + m[4] * vy + m[5] * vz)).toFloat()
+                val up = u[0] * vx + u[1] * vy + u[2] * vz
+                if (pOk && !(showGround && (pUp < 0 || up < 0)) && !(px < 0 && x < 0 || px > w && x > w || py < 0 && y < 0 || py > h && y > h)) c.drawLine(px, py, x, y, p)
+                px = x; py = y; pUp = up; pOk = true
             }
         }
         p.style = Paint.Style.FILL
@@ -568,7 +648,7 @@ class SkyView(ctx: Context) : View(ctx) {
         val name = selected ?: return
         if (traceName != name || abs(jd - traceJd) > 0.03) {
             traceName = name; traceJd = jd; trace.clear()
-            val star = bodies.firstOrNull { it.name == name }?.takeIf { it.type == "Star" }
+            val star = Astro.starByName(jd, name)
             for (k in 0..288) {
                 val j = jd + k * 5.0 / 1440
                 val b = star ?: Astro.all(j, false).firstOrNull { it.name == name } ?: return
@@ -592,7 +672,7 @@ class SkyView(ctx: Context) : View(ctx) {
 
     /** Edge arrow pointing to the selected object when it is outside the field of view. */
     private fun drawArrow(c: Canvas, jd: Double, bodies: List<Body>) {
-        val b = bodies.firstOrNull { it.name == selected } ?: return
+        val b = bodies.firstOrNull { it.name == selected } ?: Astro.starByName(jd, selected ?: "") ?: return
         val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, jd)
         val a = Math.toRadians(az - decl); val e = Math.toRadians(alt)
         val wx = cos(e) * sin(a); val wy = cos(e) * cos(a); val wz = sin(e); val r = rot
