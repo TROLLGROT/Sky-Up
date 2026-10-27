@@ -62,6 +62,16 @@ object Astro {
         STARS.split(";").map { val p = it.split(","); Body(p[0], "Star", p[1].toDouble() * 15, p[2].toDouble(), p[3].toDouble()) }
     }
 
+    private var starCache: List<Body>? = null
+    private var starCacheJd = 0.0
+    private fun precessedStars(jd: Double): List<Body> {
+        val c = starCache
+        if (c != null && abs(jd - starCacheJd) < 2.0) return c
+        val src = if (Catalog.stars.isNotEmpty()) Catalog.stars else starList
+        val l = src.map { s -> val (r, de) = precess(s.ra, s.dec, jd); Body(s.name, s.type, r, de, s.mag, "", s.bv) }
+        starCache = l; starCacheJd = jd; return l
+    }
+
     fun all(jd: Double, withStars: Boolean = true): List<Body> {
         val T = (jd - 2451545.0) / 36525.0
         val d = jd - 2451545.0
@@ -88,7 +98,7 @@ object Astro {
             val (pr, pd) = precess(r, de, jd)
             out.add(Body(NAMES[i], "Planet", pr, pd, MAGS[i], "Distance from Earth %.3f AU".format(sqrt(x * x + y * y + z * z))))
         }
-        if (withStars) for (s in (if (Catalog.stars.isNotEmpty()) Catalog.stars else starList)) { val (r, de) = precess(s.ra, s.dec, jd); out.add(Body(s.name, s.type, r, de, s.mag, "", s.bv)) }
+        if (withStars) out.addAll(precessedStars(jd))
         return out
     }
 

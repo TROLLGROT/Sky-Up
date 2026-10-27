@@ -40,6 +40,14 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private val n = FloatArray(4)
     private var hasQuaternion = false
     private val rot = FloatArray(9)
+    private val rg = FloatArray(9)
+    private val rm = FloatArray(9)
+    private var useGame = false
+    private var haveMag = false
+    private var psi = 0.0
+    private var psiN = 0
+    private var magAcc = 3
+    private var night = false
 
     private val prefs by lazy { getSharedPreferences("sky", MODE_PRIVATE) }
     private val blue = 0xFF0D2D59.toInt()
@@ -53,12 +61,13 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         window.navigationBarColor = 0xFF06152B.toInt()
 
         L.ru = prefs.getString("lang", "ru") == "ru"
+        night = nightAt(prefs.getFloat("lat", 0f).toDouble(), prefs.getFloat("lon", 0f).toDouble(), prefs.contains("lat"))
         Catalog.load(this)
         sky = SkyView(this).apply {
             showConstellations = prefs.getBoolean("cons", true); showConNames = prefs.getBoolean("conNames", true)
             showGround = prefs.getBoolean("ground", true); showGrid = prefs.getBoolean("grid", false)
             daylightSky = prefs.getBoolean("day", true); nightMode = prefs.getBoolean("night", false)
-            starLimit = prefs.getFloat("starLimit", 5.5f).toDouble()
+            starLimit = prefs.getFloat("starLimit2", 6.3f).toDouble()
             drawStarNames = prefs.getBoolean("star_names", true)
             drawPlanetNames = prefs.getBoolean("planet_names", true)
             drawPlanetDetails = prefs.getBoolean("planet_details", true)
@@ -107,8 +116,12 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     override fun onResume() {
         super.onResume()
-        val sensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-        if (sensor != null) sm.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)
+        val game = sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+        val mag = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        useGame = game != null && mag != null
+        // gyro-driven (smooth, no drift in short term) + slow magnetic heading correction
+        if (useGame) { sm.registerListener(this, game, SensorManager.SENSOR_DELAY_GAME); sm.registerListener(this, mag, SensorManager.SENSOR_DELAY_UI) }
+        else if (mag != null) sm.registerListener(this, mag, SensorManager.SENSOR_DELAY_GAME)
         startLocation()
     }
 
@@ -167,6 +180,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     override fun onProviderDisabled(provider: String) { }
 
     override fun onSensorChanged(event: SensorEvent) {
+        if (useGame && event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) { SensorManager.getRotationMatrixFromVector(rm, event.values); haveMag = true; updatePsi(); return }
         SensorManager.getQuaternionFromVector(n, event.values)
         if (!hasQuaternion) {
             n.copyInto(q)
@@ -183,12 +197,43 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             val length = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
             if (length > 0f) for (i in 0..3) q[i] /= length
         }
-        SensorManager.getRotationMatrixFromVector(rot, floatArrayOf(q[1], q[2], q[3], q[0]))
+        SensorManager.getRotationMatrixFromVector(rg, floatArrayOf(q[1], q[2], q[3], q[0]))
+        if (useGame && haveMag && psiN > 0) applyPsi() else rg.copyInto(rot)
         sky.rot = rot.copyOf()
         sky.invalidate()
     }
 
+    private fun updatePsi() {
+        if (!hasQuaternion) return
+        var sx = 0.0; var sy = 0.0
+        for (i in 0..2) { val gx = rg[i].toDouble(); val gy = rg[3 + i].toDouble(); val mx = rm[i].toDouble(); val my = rm[3 + i].toDouble(); sx += gx * mx + gy * my; sy += gx * my - gy * mx }
+        val target = kotlin.math.atan2(sy, sx)
+        if (psiN == 0) psi = target else {
+            var d = target - psi
+            while (d > Math.PI) d -= 2 * Math.PI
+            while (d < -Math.PI) d += 2 * Math.PI
+            val k = (if (psiN < 150) 0.06 else 0.004) * (if (magAcc <= SensorManager.SENSOR_STATUS_ACCURACY_LOW) 0.25 else 1.0)
+            psi += k * d
+        }
+        psiN++
+    }
+
+    private fun applyPsi() {
+        val c = kotlin.math.cos(psi).toFloat(); val s = kotlin.math.sin(psi).toFloat()
+        for (j in 0..2) { rot[j] = c * rg[j] - s * rg[3 + j]; rot[3 + j] = s * rg[j] + c * rg[3 + j]; rot[6 + j] = rg[6 + j] }
+    }
+
+    private fun nightAt(la: Double, lo: Double, has: Boolean): Boolean {
+        val ms = System.currentTimeMillis()
+        if (!has) { val h = java.util.Calendar.getInstance().apply { timeInMillis = ms }.get(java.util.Calendar.HOUR_OF_DAY); return h >= 21 || h < 6 }
+        val jd = Astro.jd(ms); val sun = Astro.all(jd, false).first { it.name == "Sun" }
+        return Astro.altAz(sun.ra, sun.dec, la, lo, jd).first < -2.0
+    }
+
+    private fun tone(c: Int): Int = if (!night) c else Color.argb(Color.alpha(c), (Color.red(c) * 0.34f).toInt(), (Color.green(c) * 0.36f).toInt(), (Color.blue(c) * 0.42f).toInt())
+
     override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {
+        if (sensor.type == Sensor.TYPE_ROTATION_VECTOR) magAcc = accuracy
         sky.lowAccuracy = accuracy <= SensorManager.SENSOR_STATUS_ACCURACY_LOW
         sky.invalidate()
     }
@@ -196,6 +241,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private fun recalibrateCompass() {
         // Drop the smoothed orientation so the next rotation-vector sample is used as a fresh baseline.
         hasQuaternion = false
+        psiN = 0
         sky.clearSelection()
         sky.lowAccuracy = false
         sky.invalidate()
@@ -213,7 +259,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         bar.addView(label, LinearLayout.LayoutParams(-2, -1))
         bar.addView(chip("+1" + L.t("h", "ч")) { sky.timeOffset += 3600000L; sky.invalidate() }, LinearLayout.LayoutParams(-2, -1))
         val h = android.os.Handler(android.os.Looper.getMainLooper())
-        h.post(object : Runnable { override fun run() { label.text = fmt.format(java.util.Date(sky.now())); h.postDelayed(this, 1000) } })
+        h.post(object : Runnable { override fun run() { if (nightAt(sky.lat, sky.lon, sky.hasLocation) != night) { recreate(); return }; label.text = fmt.format(java.util.Date(sky.now())); h.postDelayed(this, 1000) } })
         return bar
     }
 
@@ -241,7 +287,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             setPadding(dp(18), dp(8), dp(16), dp(8))
             background = GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT,
-                intArrayOf(0xE90A2347.toInt(), 0xB91C5A91.toInt(), 0x001C5A91)
+                intArrayOf(tone(0xE90A2347.toInt()), tone(0xB91C5A91.toInt()), tone(0x001C5A91))
             )
         }
         val title = TextView(this).apply {
@@ -335,6 +381,23 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         header.addView(close, LinearLayout.LayoutParams(dp(42), dp(42)))
         panel.addView(header)
+        panel.addView(sectionLabel(L.t("COMPASS", "КОМПАС")), topMargin())
+        val hint = TextView(this).apply {
+            text = L.t("Recalibrate when the compass feels inaccurate. Move the phone slowly in a figure‑8 after resetting.", "Если компас врёт — нажмите и медленно опишите телефоном восьмёрку.")
+            setTextColor(0xFFD7ECFF.toInt())
+            textSize = 12f
+            setLineSpacing(dp(2).toFloat(), 1f)
+        }
+        panel.addView(hint, topMargin())
+        val recalibrate = Button(this).apply {
+            text = L.t("⟳   RECALIBRATE COMPASS", "⟳   ПЕРЕКАЛИБРОВАТЬ КОМПАС")
+            isAllCaps = false
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            background = roundedGradient(0xFF1478B9.toInt(), 0xFF48A7E4.toInt(), 18)
+            setOnClickListener { recalibrateCompass() }
+        }
+        panel.addView(recalibrate, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
         panel.addView(sectionLabel(L.t("DISPLAY", "ЭКРАН")), topMargin())
 
         fovValue = TextView(this).apply {
@@ -387,10 +450,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val starTxt = TextView(this).apply { setTextColor(paleBlue); textSize = 13f; text = L.t("Faintest star shown: ", "Самая слабая звезда: ") + "%.1f".format(sky.starLimit) }
         panel.addView(starTxt, topMargin())
         panel.addView(SeekBar(this).apply {
-            max = 35; progress = ((sky.starLimit - 2) * 10).toInt().coerceIn(0, 35)
+            max = 45; progress = ((sky.starLimit - 2) * 10).toInt().coerceIn(0, 45)
             progressTintList = android.content.res.ColorStateList.valueOf(lightBlue); thumbTintList = android.content.res.ColorStateList.valueOf(paleBlue)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, v: Int, u: Boolean) { sky.starLimit = 2.0 + v / 10.0; starTxt.text = L.t("Faintest star shown: ", "Самая слабая звезда: ") + "%.1f".format(sky.starLimit); prefs.edit().putFloat("starLimit", sky.starLimit.toFloat()).apply(); sky.invalidate() }
+                override fun onProgressChanged(sb: SeekBar?, v: Int, u: Boolean) { sky.starLimit = 2.0 + v / 10.0; starTxt.text = L.t("Faintest star shown: ", "Самая слабая звезда: ") + "%.1f".format(sky.starLimit); prefs.edit().putFloat("starLimit2", sky.starLimit.toFloat()).apply(); sky.invalidate() }
                 override fun onStartTrackingTouch(sb: SeekBar?) { }
                 override fun onStopTrackingTouch(sb: SeekBar?) { }
             })
@@ -403,23 +466,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             setOnClickListener { prefs.edit().putString("lang", code).apply(); recreate() }
         }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(6) })
         panel.addView(langRow, topMargin())
-        panel.addView(sectionLabel(L.t("COMPASS", "КОМПАС")), topMargin())
-        val hint = TextView(this).apply {
-            text = L.t("Recalibrate when the compass feels inaccurate. Move the phone slowly in a figure‑8 after resetting.", "Если компас врёт — нажмите и медленно опишите телефоном восьмёрку.")
-            setTextColor(0xFFD7ECFF.toInt())
-            textSize = 12f
-            setLineSpacing(dp(2).toFloat(), 1f)
-        }
-        panel.addView(hint, topMargin())
-        val recalibrate = Button(this).apply {
-            text = L.t("⟳   RECALIBRATE COMPASS", "⟳   ПЕРЕКАЛИБРОВАТЬ КОМПАС")
-            isAllCaps = false
-            textSize = 13f
-            setTextColor(Color.WHITE)
-            background = roundedGradient(0xFF1478B9.toInt(), 0xFF48A7E4.toInt(), 18)
-            setOnClickListener { recalibrateCompass() }
-        }
-        panel.addView(recalibrate, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
 
         val reset = Button(this).apply {
             text = L.t("RESET ZOOM", "СБРОС МАСШТАБА")
@@ -471,7 +517,9 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     private fun topMargin() = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
 
-    private fun roundedGradient(start: Int, end: Int, radiusDp: Int): GradientDrawable = GradientDrawable(
+    private fun roundedGradient(a0: Int, b0: Int, r0: Int): GradientDrawable = roundedGradient2(tone(a0), tone(b0), r0)
+
+    private fun roundedGradient2(start: Int, end: Int, radiusDp: Int): GradientDrawable = GradientDrawable(
         GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(start, end)
     ).apply { cornerRadius = dp(radiusDp).toFloat() }
 
