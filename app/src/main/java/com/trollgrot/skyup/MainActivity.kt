@@ -14,12 +14,16 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
@@ -35,8 +39,28 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var root: FrameLayout
     private lateinit var settingsOverlay: FrameLayout
     private lateinit var fovValue: TextView
+    private lateinit var calibrationOverlay: FrameLayout
+    private lateinit var calibrationProgress: ProgressBar
+    private lateinit var calibrationStatus: TextView
+    private lateinit var calibrationAction: Button
 
     private val q = FloatArray(4)
+    private val qVector = FloatArray(4)
+    private val calibrationPreviousQ = FloatArray(4)
+    private val calibrationAngles = FloatArray(3)
+    private var calibrationActive = false
+    private var calibrationHasPrevious = false
+    private var calibrationStartedAt = 0L
+    private var calibrationLastUiAt = 0L
+    private var calibrationMotion = 0.0
+    private var calibrationYaw = 0.0
+    private var calibrationYawMin = Double.POSITIVE_INFINITY
+    private var calibrationYawMax = Double.NEGATIVE_INFINITY
+    private var calibrationPreviousYaw = 0.0
+    private var calibrationPitchMin = Double.POSITIVE_INFINITY
+    private var calibrationPitchMax = Double.NEGATIVE_INFINITY
+    private var calibrationRollMin = Double.POSITIVE_INFINITY
+    private var calibrationRollMax = Double.NEGATIVE_INFINITY
     private val n = FloatArray(4)
     private var hasQuaternion = false
     private val rot = FloatArray(9)
@@ -100,6 +124,9 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         settingsOverlay = makeSettingsOverlay()
         settingsOverlay.visibility = View.GONE
         root.addView(settingsOverlay, FrameLayout.LayoutParams(-1, -1))
+        calibrationOverlay = makeCalibrationOverlay()
+        calibrationOverlay.visibility = View.GONE
+        root.addView(calibrationOverlay, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
 
         sm = getSystemService(SENSOR_SERVICE) as SensorManager
@@ -197,7 +224,9 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             val length = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
             if (length > 0f) for (i in 0..3) q[i] /= length
         }
-        SensorManager.getRotationMatrixFromVector(rg, floatArrayOf(q[1], q[2], q[3], q[0]))
+        qVector[0] = q[1]; qVector[1] = q[2]; qVector[2] = q[3]; qVector[3] = q[0]
+        SensorManager.getRotationMatrixFromVector(rg, qVector)
+        trackCalibration(q)
         if (useGame && haveMag && psiN > 0) applyPsi() else rg.copyInto(rot)
         sky.rot = rot
         sky.postInvalidateOnAnimation()
@@ -239,13 +268,167 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     }
 
     private fun recalibrateCompass() {
-        // Drop the smoothed orientation so the next rotation-vector sample is used as a fresh baseline.
+        // Android owns hardware compass calibration. The app resets its orientation filter,
+        // then guides the user through a figure-eight and checks that the phone was actually moved.
         hasQuaternion = false
         psiN = 0
+        calibrationActive = true
+        calibrationHasPrevious = false
+        calibrationStartedAt = android.os.SystemClock.elapsedRealtime()
+        calibrationLastUiAt = 0L
+        calibrationMotion = 0.0
+        calibrationYaw = 0.0
+        calibrationYawMin = 0.0
+        calibrationYawMax = 0.0
+        calibrationPreviousYaw = 0.0
+        calibrationPitchMin = Double.POSITIVE_INFINITY
+        calibrationPitchMax = Double.NEGATIVE_INFINITY
+        calibrationRollMin = Double.POSITIVE_INFINITY
+        calibrationRollMax = Double.NEGATIVE_INFINITY
         sky.clearSelection()
         sky.lowAccuracy = false
         sky.invalidate()
-        Toast.makeText(this, L.t("Compass reset. Slowly move the phone in a figure‑8.", "Компас сброшен. Медленно опишите телефоном восьмёрку."), Toast.LENGTH_LONG).show()
+        calibrationProgress.progress = 0
+        calibrationStatus.text = L.t("Move the phone slowly in a figure-eight", "Медленно перемещайте телефон восьмёркой")
+        calibrationAction.text = L.t("CANCEL", "ОТМЕНА")
+        calibrationOverlay.visibility = View.VISIBLE
+        calibrationOverlay.bringToFront()
+    }
+
+    private fun trackCalibration(current: FloatArray) {
+        if (!calibrationActive) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!calibrationHasPrevious) {
+            current.copyInto(calibrationPreviousQ)
+            SensorManager.getOrientation(rg, calibrationAngles)
+            calibrationPreviousYaw = calibrationAngles[0].toDouble()
+            calibrationHasPrevious = true
+        } else {
+            var dot = 0.0
+            for (i in 0..3) dot += current[i] * calibrationPreviousQ[i]
+            val delta = 2.0 * acos(kotlin.math.abs(dot).coerceIn(0.0, 1.0))
+            if (delta > Math.toRadians(0.2)) calibrationMotion += delta
+            current.copyInto(calibrationPreviousQ)
+            SensorManager.getOrientation(rg, calibrationAngles)
+            var yawDelta = calibrationAngles[0].toDouble() - calibrationPreviousYaw
+            while (yawDelta > Math.PI) yawDelta -= 2.0 * Math.PI
+            while (yawDelta < -Math.PI) yawDelta += 2.0 * Math.PI
+            calibrationYaw += yawDelta
+            calibrationYawMin = minOf(calibrationYawMin, calibrationYaw)
+            calibrationYawMax = maxOf(calibrationYawMax, calibrationYaw)
+            calibrationPreviousYaw = calibrationAngles[0].toDouble()
+            val pitch = calibrationAngles[1].toDouble()
+            val roll = calibrationAngles[2].toDouble()
+            calibrationPitchMin = minOf(calibrationPitchMin, pitch)
+            calibrationPitchMax = maxOf(calibrationPitchMax, pitch)
+            calibrationRollMin = minOf(calibrationRollMin, roll)
+            calibrationRollMax = maxOf(calibrationRollMax, roll)
+        }
+
+        val pitchSpan = if (calibrationPitchMin.isFinite()) calibrationPitchMax - calibrationPitchMin else 0.0
+        val rollSpan = if (calibrationRollMin.isFinite()) calibrationRollMax - calibrationRollMin else 0.0
+        val yawSpan = if (calibrationYawMin.isFinite()) calibrationYawMax - calibrationYawMin else 0.0
+        val variedAxes = (if (yawSpan > 0.55) 1 else 0) + (if (pitchSpan > 0.30) 1 else 0) + (if (rollSpan > 0.30) 1 else 0)
+        val elapsed = now - calibrationStartedAt
+        val complete = elapsed >= 5_000L && calibrationMotion >= 3.2 && variedAxes >= 2
+        if (now - calibrationLastUiAt >= 150L || complete) {
+            calibrationLastUiAt = now
+            val progress = (calibrationMotion / 3.2 * 100).toInt().coerceIn(0, 95)
+            runOnUiThread {
+                if (!calibrationActive) return@runOnUiThread
+                calibrationProgress.progress = if (complete) 100 else progress
+                if (complete) {
+                    calibrationActive = false
+                    calibrationStatus.text = L.t("Movement check complete. Compass accuracy is controlled by Android.", "Движение распознано. Точность компаса контролирует Android.")
+                    calibrationAction.text = L.t("DONE", "ГОТОВО")
+                    vibrateCalibrationComplete()
+                    Toast.makeText(this, L.t("Calibration movement complete", "Калибровочное движение завершено"), Toast.LENGTH_SHORT).show()
+                } else {
+                    calibrationStatus.text = if (elapsed < 5_000L)
+                        L.t("Keep moving slowly in a figure-eight…", "Продолжайте медленно описывать восьмёрку…")
+                    else L.t("Change direction and tilt a little more", "Меняйте направление и немного наклоняйте телефон")
+                }
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun vibrateCalibrationComplete() {
+        try {
+            val vibrator = getSystemService(VIBRATOR_SERVICE) as Vibrator
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) vibrator.vibrate(VibrationEffect.createOneShot(120L, VibrationEffect.DEFAULT_AMPLITUDE))
+            else vibrator.vibrate(120L)
+        } catch (_: Exception) { }
+    }
+
+    private fun makeCalibrationOverlay(): FrameLayout {
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(0xB8000714.toInt())
+            isClickable = true
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(24), dp(22), dp(24), dp(22))
+            background = roundedGradient(0xF20A2347.toInt(), 0xF21B5B91.toInt(), 24)
+            elevation = dp(18).toFloat()
+            setOnClickListener { /* Keep taps inside the calibration card. */ }
+        }
+        val icon = TextView(this).apply {
+            text = "∞"
+            textSize = 64f
+            gravity = Gravity.CENTER
+            setTextColor(0xFF73CCFF.toInt())
+            setShadowLayer(dp(10).toFloat(), 0f, 0f, 0xAA3C9BFF.toInt())
+        }
+        panel.addView(icon, LinearLayout.LayoutParams(-1, dp(88)))
+        panel.addView(TextView(this).apply {
+            text = L.t("COMPASS CALIBRATION", "КАЛИБРОВКА КОМПАСА")
+            textSize = 17f
+            letterSpacing = 0.06f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }, LinearLayout.LayoutParams(-1, -2))
+        calibrationStatus = TextView(this).apply {
+            text = L.t("Move the phone slowly in a figure-eight", "Медленно перемещайте телефон восьмёркой")
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setTextColor(0xFFD8ECFF.toInt())
+            setPadding(0, dp(12), 0, dp(12))
+        }
+        panel.addView(calibrationStatus, LinearLayout.LayoutParams(-1, -2))
+        calibrationProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = 0
+            progressTintList = android.content.res.ColorStateList.valueOf(lightBlue)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0xFF254A70.toInt())
+        }
+        panel.addView(calibrationProgress, LinearLayout.LayoutParams(-1, dp(8)))
+        panel.addView(TextView(this).apply {
+            text = L.t("Keep the phone moving for a few seconds. This app guides the movement check; Android handles sensor calibration.", "Продолжайте движение несколько секунд. Приложение проверяет движение, а калибровкой датчиков управляет Android.")
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setTextColor(0xFFC1D9EE.toInt())
+            setPadding(0, dp(12), 0, dp(14))
+        }, LinearLayout.LayoutParams(-1, -2))
+        calibrationAction = Button(this).apply {
+            text = L.t("CANCEL", "ОТМЕНА")
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            background = roundedGradient(0xFF1478B9.toInt(), 0xFF48A7E4.toInt(), 18)
+            setOnClickListener {
+                if (calibrationActive) {
+                    calibrationActive = false
+                    calibrationOverlay.visibility = View.GONE
+                } else calibrationOverlay.visibility = View.GONE
+            }
+        }
+        panel.addView(calibrationAction, LinearLayout.LayoutParams(-1, dp(46)))
+        overlay.addView(panel, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply {
+            setMargins(dp(28), dp(20), dp(28), dp(20))
+        })
+        return overlay
     }
 
     private fun makeTimeBar(): View {
@@ -259,7 +442,19 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         bar.addView(label, LinearLayout.LayoutParams(-2, -1))
         bar.addView(chip("+1" + L.t("h", "ч")) { sky.timeOffset += 3600000L; sky.invalidate() }, LinearLayout.LayoutParams(-2, -1))
         val h = android.os.Handler(android.os.Looper.getMainLooper())
-        h.post(object : Runnable { override fun run() { if (nightAt(sky.lat, sky.lon, sky.hasLocation) != night) { recreate(); return }; label.text = fmt.format(java.util.Date(sky.now())); h.postDelayed(this, 1000) } })
+        var lastNightCheck = 0L
+        h.post(object : Runnable {
+            override fun run() {
+                val now = System.currentTimeMillis()
+                // The sun's altitude does not need a fresh ephemeris calculation every second.
+                if (now - lastNightCheck >= 60_000L) {
+                    lastNightCheck = now
+                    if (nightAt(sky.lat, sky.lon, sky.hasLocation) != night) { recreate(); return }
+                }
+                label.text = fmt.format(java.util.Date(sky.now()))
+                h.postDelayed(this, 1000)
+            }
+        })
         return bar
     }
 

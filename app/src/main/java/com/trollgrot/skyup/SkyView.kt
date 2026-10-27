@@ -35,6 +35,21 @@ class SkyView(ctx: Context) : View(ctx) {
     private val trace = ArrayList<DoubleArray>()
     private val timeFmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
     private val quad = Path()
+    private val quadCoords = FloatArray(8)
+    private val azimuthSin = DoubleArray(360)
+    private val azimuthCos = DoubleArray(360)
+    private var trigDeclination = Double.NaN
+    private val skylineSamples = DoubleArray(361) { i ->
+        val a = Math.toRadians(i.toDouble())
+        0.9 + 0.5 * sin(3 * a + 0.3) + 0.3 * sin(7 * a + 1.7) + 0.18 * sin(17 * a + 4.0)
+    }
+    private val dwellRect = RectF()
+    private val arrowPath = Path()
+    private var backgroundShader: Shader? = null
+    private var backgroundShaderWidth = -1
+    private var backgroundShaderHeight = -1
+    private var cachedBodies: List<Body> = emptyList()
+    private var cachedBodiesJd = Double.NaN
     fun select(name: String) {
         selected = name; lastInfo = System.currentTimeMillis(); val jd = Astro.jd(now())
         Astro.all(jd).firstOrNull { it.name == name }?.let { onSelect?.invoke(info(it, jd)) }
@@ -102,10 +117,16 @@ class SkyView(ctx: Context) : View(ctx) {
         super.onDraw(canvas)
         canvas.drawColor(0xFF020817.toInt())
         if (width == 0 || height == 0) return
+        ensureAzimuthTrigCache()
 
         p.style = Paint.Style.FILL
-        p.shader = android.graphics.LinearGradient(0f, 0f, width.toFloat(), height.toFloat(),
-            intArrayOf(0xFF06152E.toInt(), 0xFF020817.toInt(), 0xFF0B1530.toInt()), null, Shader.TileMode.CLAMP)
+        if (backgroundShader == null || backgroundShaderWidth != width || backgroundShaderHeight != height) {
+            backgroundShaderWidth = width
+            backgroundShaderHeight = height
+            backgroundShader = android.graphics.LinearGradient(0f, 0f, width.toFloat(), height.toFloat(),
+                intArrayOf(0xFF06152E.toInt(), 0xFF020817.toInt(), 0xFF0B1530.toInt()), null, Shader.TileMode.CLAMP)
+        }
+        p.shader = backgroundShader
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), p)
         p.shader = null
 
@@ -117,7 +138,11 @@ class SkyView(ctx: Context) : View(ctx) {
             return projectAzAlt(azimuth, altitude, focal)
         }
 
-        val bodies = Astro.all(julianDay, false)
+        // Ephemeris changes slowly compared with the sensor-driven frame rate. Reuse the
+        // last positions for up to one second rather than recalculating every rendered frame.
+        val bodies = if (cachedBodies.isEmpty() || abs(julianDay - cachedBodiesJd) >= 1.0 / 86400.0) {
+            Astro.all(julianDay, false).also { cachedBodies = it; cachedBodiesJd = julianDay }
+        } else cachedBodies
         val sunAlt = bodies.first { it.name == "Sun" }.let { Astro.altAz(it.ra, it.dec, lat, lon, julianDay).first }
         val day = if (daylightSky) ((sunAlt + 12) / 12).coerceIn(0.0, 1.0).toFloat() else 0f
         val twi = if (daylightSky) (1 - abs(sunAlt + 5) / 11).coerceIn(0.0, 1.0).toFloat() else 0f
@@ -227,9 +252,10 @@ class SkyView(ctx: Context) : View(ctx) {
         textPaint.setShadowLayer(5f * dp, 0f, 0f, 0xAA65B8FF.toInt())
         textPaint.textSize = 14f * dp
         textPaint.color = 0xFF8EC8F5.toInt()
-        for ((label, azimuth) in listOf(L.t("N", "С") to 0.0, L.t("E", "В") to 90.0, L.t("S", "Ю") to 180.0, L.t("W", "З") to 270.0)) {
-            projectAzAlt(azimuth, 0.0, focal)?.let { canvas.drawText(label, it.x - 5f * dp, it.y - 8f * dp, textPaint) }
-        }
+        projectAzAlt(0.0, 0.0, focal)?.let { canvas.drawText(L.t("N", "С"), it.x - 5f * dp, it.y - 8f * dp, textPaint) }
+        projectAzAlt(90.0, 0.0, focal)?.let { canvas.drawText(L.t("E", "В"), it.x - 5f * dp, it.y - 8f * dp, textPaint) }
+        projectAzAlt(180.0, 0.0, focal)?.let { canvas.drawText(L.t("S", "Ю"), it.x - 5f * dp, it.y - 8f * dp, textPaint) }
+        projectAzAlt(270.0, 0.0, focal)?.let { canvas.drawText(L.t("W", "З"), it.x - 5f * dp, it.y - 8f * dp, textPaint) }
         textPaint.clearShadowLayer()
     }
 
@@ -272,12 +298,19 @@ class SkyView(ctx: Context) : View(ctx) {
     // ---- fast star pipeline: one 3x3 matrix per frame (equatorial -> device), no trig per star
     private val M = DoubleArray(9)
     private val Ueq = DoubleArray(3)
+    private val basisE = DoubleArray(3)
+    private val basisN = DoubleArray(3)
+    private val basisUp = DoubleArray(3)
+    private val basisW0 = DoubleArray(3)
+    private val basisW1 = DoubleArray(3)
     private fun prepMatrix(jd: Double) {
         val th = Math.toRadians(Astro.norm(280.46061837 + 360.98564736629 * (jd - 2451545.0) + lon)); val ph = Math.toRadians(lat); val ps = Math.toRadians(decl)
         val st = sin(th); val ct = cos(th); val sp = sin(ph); val cp = cos(ph); val sps = sin(ps); val cps = cos(ps)
-        val e = doubleArrayOf(-st, ct, 0.0); val n = doubleArrayOf(-ct * sp, -st * sp, cp); val up = doubleArrayOf(ct * cp, st * cp, sp)
-        for (i in 0..2) Ueq[i] = up[i]
-        val w0 = DoubleArray(3); val w1 = DoubleArray(3)
+        val e = basisE; val n = basisN; val up = basisUp; val w0 = basisW0; val w1 = basisW1
+        e[0] = -st; e[1] = ct; e[2] = 0.0
+        n[0] = -ct * sp; n[1] = -st * sp; n[2] = cp
+        up[0] = ct * cp; up[1] = st * cp; up[2] = sp
+        Ueq[0] = up[0]; Ueq[1] = up[1]; Ueq[2] = up[2]
         for (i in 0..2) { w0[i] = cps * e[i] - sps * n[i]; w1[i] = sps * e[i] + cps * n[i] }
         val r = rot
         for (i in 0..2) for (k in 0..2) M[i * 3 + k] = r[i] * w0[k] + r[3 + i] * w1[k] + r[6 + i] * up[k]
@@ -330,15 +363,16 @@ class SkyView(ctx: Context) : View(ctx) {
     private var dwellStart = 0L
     /** Hold the crosshair on an object for one second to select it. */
     private fun updateDwell(c: Canvas) {
-        val cx = width / 2f; val cy = height / 2f; val lim = 30f * dp
-        var best: Body? = null; var bs = Float.MAX_VALUE
-        for ((b, q) in hits) { val d = hypot(q.x - cx, q.y - cy); if (d > lim) continue; val sc = d - (if (b.mag < 2.5) 12f * dp else 0f); if (sc < bs) { bs = sc; best = b } }
+        val cx = width / 2f; val cy = height / 2f; val lim = 30.0 * dp
+        var best: Body? = null; var bs = Double.POSITIVE_INFINITY
+        for ((b, q) in hits) { val d = hypot((q.x - cx).toDouble(), (q.y - cy).toDouble()); if (d > lim) continue; val sc = d - (if (b.mag < 2.5) 12.0 * dp else 0.0); if (sc < bs) { bs = sc; best = b } }
         val nm = best?.name; val t = System.currentTimeMillis()
         if (nm != dwellName) { dwellName = nm; dwellStart = t }
         if (nm != null && nm != selected) {
             val pr = ((t - dwellStart) / 1000f).coerceIn(0f, 1f)
             p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 2.5f * dp; p.color = 0xFF9BE7FF.toInt()
-            c.drawArc(RectF(cx - 18 * dp, cy - 18 * dp, cx + 18 * dp, cy + 18 * dp), -90f, 360f * pr, false, p); p.style = Paint.Style.FILL
+            dwellRect.set(cx - 18 * dp, cy - 18 * dp, cx + 18 * dp, cy + 18 * dp)
+            c.drawArc(dwellRect, -90f, 360f * pr, false, p); p.style = Paint.Style.FILL
             if (pr >= 1f) select(nm) else postInvalidateOnAnimation()
         }
     }
@@ -568,37 +602,83 @@ class SkyView(ctx: Context) : View(ctx) {
         (Color.alpha(a) + (Color.alpha(b) - Color.alpha(a)) * t).toInt(), (Color.red(a) + (Color.red(b) - Color.red(a)) * t).toInt(),
         (Color.green(a) + (Color.green(b) - Color.green(a)) * t).toInt(), (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt())
 
-    private fun quadFill(c: Canvas, f: Float, az0: Double, t0: Double, az1: Double, t1: Double, bot: Double, color: Int) {
-        val a = projectAzAlt(az0, t0, f); val b = projectAzAlt(az1, t1, f); val d = projectAzAlt(az1, bot, f); val e = projectAzAlt(az0, bot, f)
-        if (a == null || b == null || d == null || e == null) return
-        if (maxOf(a.x, b.x, d.x, e.x) < 0 || minOf(a.x, b.x, d.x, e.x) > width || maxOf(a.y, b.y, d.y, e.y) < 0 || minOf(a.y, b.y, d.y, e.y) > height) return
-        p.color = color
-        quad.rewind(); quad.moveTo(a.x, a.y); quad.lineTo(b.x, b.y); quad.lineTo(d.x, d.y); quad.lineTo(e.x, e.y); quad.close()
-        c.drawPath(quad, p)
+    private fun ensureAzimuthTrigCache() {
+        if (trigDeclination == decl) return
+        for (i in 0 until 360) {
+            val a = Math.toRadians(i - decl)
+            azimuthSin[i] = sin(a)
+            azimuthCos[i] = cos(a)
+        }
+        trigDeclination = decl
+    }
+
+    // Writes projected coordinates into a shared buffer so the hundreds of horizon-band
+    // quads per frame do not allocate temporary Projected objects.
+    private fun projectAzAltInto(azimuth: Double, altitude: Double, focalLength: Float, out: FloatArray, offset: Int): Boolean {
+        val index = ((azimuth.toInt() % 360) + 360) % 360
+        val ce = cos(Math.toRadians(altitude)); val se = sin(Math.toRadians(altitude))
+        val wx = ce * azimuthSin[index]; val wy = ce * azimuthCos[index]; val wz = se
+        val r = rot
+        val dx = r[0] * wx + r[3] * wy + r[6] * wz
+        val dy = r[1] * wx + r[4] * wy + r[7] * wz
+        val dz = r[2] * wx + r[5] * wy + r[8] * wz
+        val denom = 1.0 - dz
+        if (denom < 0.4) return false
+        val k = 2.0 * focalLength / denom
+        out[offset] = (width / 2.0 + k * dx).toFloat()
+        out[offset + 1] = (height / 2.0 - k * dy).toFloat()
+        return true
+    }
+
+    private fun quadAppend(path: Path, f: Float, az0: Double, t0: Double, az1: Double, t1: Double, bot: Double) {
+        val v = quadCoords
+        if (!projectAzAltInto(az0, t0, f, v, 0) || !projectAzAltInto(az1, t1, f, v, 2) ||
+            !projectAzAltInto(az1, bot, f, v, 4) || !projectAzAltInto(az0, bot, f, v, 6)) return
+        val minX = minOf(v[0], v[2], v[4], v[6]); val maxX = maxOf(v[0], v[2], v[4], v[6])
+        val minY = minOf(v[1], v[3], v[5], v[7]); val maxY = maxOf(v[1], v[3], v[5], v[7])
+        if (maxX < 0 || minX > width || maxY < 0 || minY > height) return
+        path.moveTo(v[0], v[1]); path.lineTo(v[2], v[3]); path.lineTo(v[4], v[5]); path.lineTo(v[6], v[7]); path.close()
     }
 
     private fun fillBand(c: Canvas, f: Float, altTop: Double, altBot: Double, color: Int) {
         p.shader = null; p.style = Paint.Style.FILL_AND_STROKE; p.strokeWidth = 1.2f
-        for (az in 0 until 360 step 10) quadFill(c, f, az.toDouble(), altTop, az + 10.0, altTop, altBot, color)
+        quad.rewind()
+        for (az in 0 until 360 step 10) quadAppend(quad, f, az.toDouble(), altTop, az + 10.0, altTop, altBot)
+        p.color = color
+        c.drawPath(quad, p)
         p.style = Paint.Style.FILL
     }
-
-    private fun skyline(az: Double): Double { val a = Math.toRadians(az); return 0.9 + 0.5 * sin(3 * a + 0.3) + 0.3 * sin(7 * a + 1.7) + 0.18 * sin(17 * a + 4.0) }
 
     private fun drawGround(c: Canvas, f: Float, day: Float) {
         val top = lerpC(0xFF0A1220.toInt(), 0xFF2A453D.toInt(), day); val deep = lerpC(0xFF02050A.toInt(), 0xFF101C1A.toInt(), day)
         val mid1 = lerpC(top, deep, 0.35f); val mid2 = lerpC(top, deep, 0.7f)
         p.shader = null; p.style = Paint.Style.FILL_AND_STROKE; p.strokeWidth = 1.2f
-        for (az in 0 until 360 step 4) quadFill(c, f, az.toDouble(), skyline(az.toDouble()), az + 4.0, skyline(az + 4.0), -5.0, top)
-        for (az in 0 until 360 step 10) { val a = az.toDouble()
-            quadFill(c, f, a, -5.0, a + 10, -5.0, -20.0, mid1); quadFill(c, f, a, -20.0, a + 10, -20.0, -45.0, mid2); quadFill(c, f, a, -45.0, a + 10, -45.0, -90.0, deep) }
+        quad.rewind()
+        for (az in 0 until 360 step 4) quadAppend(quad, f, az.toDouble(), skylineSamples[az], az + 4.0, skylineSamples[az + 4], -5.0)
+        p.color = top
+        c.drawPath(quad, p)
+
+        quad.rewind()
+        for (az in 0 until 360 step 10) { val a = az.toDouble(); quadAppend(quad, f, a, -5.0, a + 10, -5.0, -20.0) }
+        p.color = mid1
+        c.drawPath(quad, p)
+
+        quad.rewind()
+        for (az in 0 until 360 step 10) { val a = az.toDouble(); quadAppend(quad, f, a, -20.0, a + 10, -20.0, -45.0) }
+        p.color = mid2
+        c.drawPath(quad, p)
+
+        quad.rewind()
+        for (az in 0 until 360 step 10) { val a = az.toDouble(); quadAppend(quad, f, a, -45.0, a + 10, -45.0, -90.0) }
+        p.color = deep
+        c.drawPath(quad, p)
         p.style = Paint.Style.FILL
     }
 
     private fun drawGrid(c: Canvas, f: Float) {
         p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 0.8f * dp; p.color = 0x3358A6E0
-        for (alt in listOf(30.0, 60.0)) { var pr: Projected? = null
-            for (az in 0..360 step 4) { val q = projectAzAlt(az.toDouble(), alt, f); if (pr != null && q != null) c.drawLine(pr.x, pr.y, q.x, q.y, p); pr = q } }
+        for (alt in 30..60 step 30) { var pr: Projected? = null
+            for (az in 0..360 step 4) { val q = projectAzAlt(az.toDouble(), alt.toDouble(), f); if (pr != null && q != null) c.drawLine(pr.x, pr.y, q.x, q.y, p); pr = q } }
         for (az in 0 until 360 step 30) { var pr: Projected? = null
             for (alt in 0..90 step 4) { val q = projectAzAlt(az.toDouble(), alt.toDouble(), f); if (pr != null && q != null) c.drawLine(pr.x, pr.y, q.x, q.y, p); pr = q } }
         p.style = Paint.Style.FILL
@@ -682,8 +762,8 @@ class SkyView(ctx: Context) : View(ctx) {
         val ang = atan2(-dy, dx).toFloat(); val rad = min(width, height) / 2f - 70f * dp
         val cx = width / 2f + cos(ang) * rad; val cy = height / 2f + sin(ang) * rad
         c.save(); c.rotate(Math.toDegrees(ang.toDouble()).toFloat(), cx, cy)
-        val tri = Path(); tri.moveTo(cx + 16 * dp, cy); tri.lineTo(cx - 10 * dp, cy - 12 * dp); tri.lineTo(cx - 10 * dp, cy + 12 * dp); tri.close()
-        p.style = Paint.Style.FILL; p.shader = null; p.color = 0xFF58B9F5.toInt(); c.drawPath(tri, p); c.restore()
+        arrowPath.rewind(); arrowPath.moveTo(cx + 16 * dp, cy); arrowPath.lineTo(cx - 10 * dp, cy - 12 * dp); arrowPath.lineTo(cx - 10 * dp, cy + 12 * dp); arrowPath.close()
+        p.style = Paint.Style.FILL; p.shader = null; p.color = 0xFF58B9F5.toInt(); c.drawPath(arrowPath, p); c.restore()
         textPaint.textSize = 12f * dp; textPaint.color = 0xFFEAF6FF.toInt(); textPaint.textAlign = Paint.Align.CENTER
         c.drawText("${L.name(b.name)} · ${sep.toInt()}°", cx - cos(ang) * 30 * dp, cy - sin(ang) * 30 * dp, textPaint); textPaint.textAlign = Paint.Align.LEFT
     }
@@ -698,9 +778,9 @@ class SkyView(ctx: Context) : View(ctx) {
             }
             MotionEvent.ACTION_POINTER_DOWN -> gestureScaling = true
             MotionEvent.ACTION_UP -> {
-                if (!gestureScaling && !scaleDetector.isInProgress && hypot(event.x - downX, event.y - downY) < 20f * dp) {
-                    val closest = hits.minByOrNull { hypot(it.second.x - event.x, it.second.y - event.y) }
-                    if (closest != null && hypot(closest.second.x - event.x, closest.second.y - event.y) < 60f * dp) {
+                if (!gestureScaling && !scaleDetector.isInProgress && hypot((event.x - downX).toDouble(), (event.y - downY).toDouble()) < 20.0 * dp) {
+                    val closest = hits.minByOrNull { hypot((it.second.x - event.x).toDouble(), (it.second.y - event.y).toDouble()) }
+                    if (closest != null && hypot((closest.second.x - event.x).toDouble(), (closest.second.y - event.y).toDouble()) < 60.0 * dp) {
                         selected = closest.first.name
                         lastInfo = System.currentTimeMillis()
                         onSelect?.invoke(info(closest.first, Astro.jd(now())))

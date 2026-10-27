@@ -11,6 +11,15 @@ Offline Android sky viewer. Point the phone at the sky; the view follows the And
 - Compass reset/recalibration action with figure-eight guidance. Android controls the sensor's hardware calibration; the app resets its orientation filter and guides the user through the usual movement.
 - Location permission is used for local sky calculations. The app does not request internet access.
 
+## Performance and calibration update (0.3)
+
+- Reuses the sky background gradient and ephemeris body positions between sensor-driven frames.
+- Reuses matrix and projection buffers rather than allocating them during each frame.
+- Batches horizon haze and ground-band quads into a small number of canvas paths and caches fixed azimuth trigonometry/skyline samples.
+- Checks the night/day UI state once per minute instead of recalculating the Sun position every second.
+- The compass reset now shows a figure-eight calibration guide, tracks movement across orientation axes, and gives a short vibration when the movement check completes. Android still owns the physical sensor calibration; this UI does not directly recalibrate hardware.
+- Updates the launcher artwork to the supplied Sky Up logo for legacy and adaptive launcher icons.
+
 ## Build an APK automatically with GitHub Actions
 
 Every push starts the **Build Android APK** workflow. On any branch, the APK is available under **Actions → latest workflow run → Artifacts → Sky-Up-debug-apk**. A push to `main` also updates the `latest` GitHub Release with the APK and its SHA-256 checksum.
