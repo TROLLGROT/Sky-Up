@@ -8,6 +8,7 @@ Offline Android sky viewer. Point the phone at the sky; the view follows the And
 - Faint background stars, soft star glows, and a blue sky-map interface.
 - Pinch-to-zoom and on-screen zoom buttons. Planet discs become larger and reveal illustrated surface details as you zoom in; the view remains a 2D sky view (there is no top-down 3D solar-system mode).
 - Settings for star names, planet names, planet detail, and field of view.
+- Tabbed settings with a dedicated star section. Selecting a star opens a swipe-to-dismiss detail page with a schematic illustration and rounded reference values for selected well-studied stars.
 - Compass reset/recalibration action with figure-eight guidance. Android controls the sensor's hardware calibration; the app resets its orientation filter and guides the user through the usual movement.
 - Location permission is used for local sky calculations. The app does not request internet access.
 
@@ -19,6 +20,7 @@ Offline Android sky viewer. Point the phone at the sky; the view follows the And
 - Checks the night/day UI state once per minute instead of recalculating the Sun position every second.
 - The compass reset now shows a figure-eight calibration guide, tracks movement across orientation axes, and gives a short vibration when the movement check completes. Android still owns the physical sensor calibration; this UI does not directly recalibrate hardware.
 - Updates the launcher artwork to the supplied Sky Up logo for legacy and adaptive launcher icons.
+- Keeps the ground and realistic daylight sky off by default, and caps sensor-driven scene redraws at about 30 frames per second to reduce rendering work.
 
 ## Build an APK automatically with GitHub Actions
 

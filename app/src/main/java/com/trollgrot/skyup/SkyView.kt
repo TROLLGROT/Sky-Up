@@ -26,8 +26,8 @@ class SkyView(ctx: Context) : View(ctx) {
     var drawStarNames = true
     var drawPlanetNames = true
     var drawPlanetDetails = true
-    var showConstellations = true; var showConNames = true; var showGrid = false; var showGround = true
-    var daylightSky = true; var nightMode = false; var starLimit = 5.5
+    var showConstellations = true; var showConNames = true; var showGrid = false; var showGround = false
+    var daylightSky = false; var nightMode = false; var starLimit = 5.5
     var timeOffset = 0L
     fun now() = System.currentTimeMillis() + timeOffset
     private var traceName: String? = null
@@ -50,15 +50,16 @@ class SkyView(ctx: Context) : View(ctx) {
     private var backgroundShaderHeight = -1
     private var cachedBodies: List<Body> = emptyList()
     private var cachedBodiesJd = Double.NaN
+    private var eclipticCacheJd = Double.NaN
+    private var eclipticCache: List<DoubleArray> = emptyList()
     fun select(name: String) {
-        selected = name; lastInfo = System.currentTimeMillis(); val jd = Astro.jd(now())
+        selected = name; val jd = Astro.jd(now())
         Astro.all(jd).firstOrNull { it.name == name }?.let { onSelect?.invoke(info(it, jd)) }
         invalidate()
     }
     var onSelect: ((String?) -> Unit)? = null
 
     private var selected: String? = null
-    private var lastInfo = 0L
     private val dp = ctx.resources.displayMetrics.density
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL) }
@@ -149,7 +150,7 @@ class SkyView(ctx: Context) : View(ctx) {
         val starFade = 1f - day * 0.97f
         if (day > 0f) canvas.drawColor(withAlpha(0xFF3A78B8.toInt(), (235 * day).toInt()))
         val haze = lerpC(lerpC(0xFF1B3A6B.toInt(), 0xFF9CC8F0.toInt(), day), 0xFFFF8A3C.toInt(), twi * 0.8f)
-        for (i in 0 until 8) fillBand(canvas, focal, i * 3.5 + 3.5, i * 3.5, withAlpha(haze, (130 * (1 - i / 8f) * (1 - i / 8f)).toInt()))
+        if (day > 0f) for (i in 0 until 8) fillBand(canvas, focal, i * 3.5 + 3.5, i * 3.5, withAlpha(haze, (130 * (1 - i / 8f) * (1 - i / 8f)).toInt()))
         if (Catalog.stars.isEmpty()) drawBackgroundStars(canvas, ::project)
         if (showGrid) drawGrid(canvas, focal)
         if (showConstellations) drawConstellations(canvas, julianDay, day, focal, ::project)
@@ -194,10 +195,6 @@ class SkyView(ctx: Context) : View(ctx) {
                 canvas.drawCircle(point.x, point.y, radius + 8f * dp, p)
                 p.style = Paint.Style.FILL
             }
-            if (body.name == selected && System.currentTimeMillis() - lastInfo > 450) {
-                lastInfo = System.currentTimeMillis()
-                onSelect?.invoke(info(body, julianDay))
-            }
         }
 
         if (showGround) drawGround(canvas, focal, day)
@@ -229,20 +226,35 @@ class SkyView(ctx: Context) : View(ctx) {
         p.strokeWidth = 1.3f * dp
         p.color = 0x775AA9D8.toInt()
         var previous: Projected? = null
-        for (azimuth in 0..(if (showGround) -1 else 360) step 3) {
-            val current = projectAzAlt(azimuth.toDouble(), 0.0, focal)
-            if (previous != null && current != null) canvas.drawLine(previous.x, previous.y, current.x, current.y, p)
-            previous = current
+        if (showGround) {
+            for (azimuth in 0..360 step 3) {
+                val current = projectAzAlt(azimuth.toDouble(), 0.0, focal)
+                if (previous != null && current != null) canvas.drawLine(previous.x, previous.y, current.x, current.y, p)
+                previous = current
+            }
         }
 
         p.strokeWidth = 1f * dp
         p.color = 0x48F6D58A
         previous = null
-        for (longitude in 0..360 step 3) {
-            val (ra, dec) = Astro.eclipticPoint(longitude.toDouble(), jd)
-            val current = project(ra, dec)
-            if (previous != null && current != null) canvas.drawLine(previous.x, previous.y, current.x, current.y, p)
-            previous = current
+        if (eclipticCache.isEmpty() || abs(jd - eclipticCacheJd) >= 1.0) {
+            eclipticCacheJd = jd
+            eclipticCache = (0..360 step 3).map { longitude ->
+                val (ra, dec) = Astro.eclipticPoint(longitude.toDouble(), jd)
+                val r = Math.toRadians(ra); val d = Math.toRadians(dec)
+                doubleArrayOf(cos(d) * cos(r), cos(d) * sin(r), sin(d))
+            }
+        }
+        val m = M; val cx = width / 2f; val cy = height / 2f; val k2 = 2.0 * focal
+        var prevX = 0f; var prevY = 0f; var prevOk = false
+        for (v in eclipticCache) {
+            val den = 1.0 - (m[6] * v[0] + m[7] * v[1] + m[8] * v[2])
+            if (den < 0.4) { prevOk = false; continue }
+            val k = k2 / den
+            val x = (cx + k * (m[0] * v[0] + m[1] * v[1] + m[2] * v[2])).toFloat()
+            val y = (cy - k * (m[3] * v[0] + m[4] * v[1] + m[5] * v[2])).toFloat()
+            if (prevOk) canvas.drawLine(prevX, prevY, x, y, p)
+            prevX = x; prevY = y; prevOk = true
         }
         p.style = Paint.Style.FILL
     }
@@ -351,7 +363,6 @@ class SkyView(ctx: Context) : View(ctx) {
             if (isSel) {
                 p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 1.8f * dp; p.color = 0xFF9BE7FF.toInt()
                 c.drawCircle(x, y, rad + 8f * dp, p); p.style = Paint.Style.FILL
-                if (System.currentTimeMillis() - lastInfo > 450) { lastInfo = System.currentTimeMillis(); onSelect?.invoke(info(b, jd)) }
             }
         }
         ptPaint.color = withAlpha(0xFFDDE8FF.toInt(), (205 * fade).toInt()); ptPaint.strokeWidth = 2.6f * dp; c.drawPoints(bufA, 0, na, ptPaint)
@@ -593,8 +604,23 @@ class SkyView(ctx: Context) : View(ctx) {
         val (alt, az) = Astro.altAz(body.ra, body.dec, lat, lon, jd)
         val mag = if (body.name == "Moon") "" else L.t("Magnitude ", "Звёздная величина ") + "%.1f\n".format(body.mag)
         val dist = if (body.dist.isEmpty()) "" else "\n" + (if (L.ru) body.dist.replace("Distance from Earth", "Расстояние от Земли").replace("Distance", "Расстояние").replace(" AU", " а.е.").replace(" km", " км") else body.dist)
+        val star = if (body.type == "Star") {
+            val facts = Catalog.starFacts[body.name]
+            val colorClass = when {
+                body.bv < -0.2 -> "O/B"
+                body.bv < 0.0 -> "B"
+                body.bv < 0.3 -> "A"
+                body.bv < 0.58 -> "F"
+                body.bv < 0.81 -> "G"
+                body.bv < 1.4 -> "K"
+                else -> "M"
+            }
+            if (facts != null) "\n\n${L.t("ABOUT THIS STAR", "О ЗВЕЗДЕ")}\n${L.t("Class", "Класс")}: ${facts.kind}\n${L.t("Radius", "Радиус")}: ${facts.radius}\n${L.t("Mass", "Масса")}: ${facts.mass}\n${L.t("Distance from Earth", "Расстояние от Земли")}: ${facts.distanceLy}\n\n${facts.note}\n${L.t("Values are rounded reference estimates.", "Значения округлены и приведены для справки.")}"
+            else "\n\n${L.t("ABOUT THIS STAR", "О ЗВЕЗДЕ")}\n${L.t("Approximate colour class", "Примерный спектральный класс по цвету")}: $colorClass\n${L.t("Color index B−V", "Индекс цвета B−V")}: %.2f\n".format(body.bv) +
+                L.t("The catalog has no reliable radius, mass or distance for this star yet.", "В каталоге пока нет надёжных данных о радиусе, массе и расстоянии этой звезды.")
+        } else ""
         return "${L.name(body.name)} · ${L.type(body.type)}\n$mag" + L.t("RA ", "Пр. восх. ") + formatHours(body.ra) + "   " + L.t("Dec ", "Скл. ") + "%.2f°\n".format(body.dec) +
-            L.t("Altitude ", "Высота ") + "%.1f°   ".format(alt) + L.t("Azimuth ", "Азимут ") + "%.1f°".format(az) + dist + "\n" + riseSet(body, jd) +
+            L.t("Altitude ", "Высота ") + "%.1f°   ".format(alt) + L.t("Azimuth ", "Азимут ") + "%.1f°".format(az) + dist + star + "\n\n" + riseSet(body, jd) +
             (if (alt < 0) "\n" + L.t("Below the horizon", "Под горизонтом") else "")
     }
 
@@ -782,7 +808,6 @@ class SkyView(ctx: Context) : View(ctx) {
                     val closest = hits.minByOrNull { hypot((it.second.x - event.x).toDouble(), (it.second.y - event.y).toDouble()) }
                     if (closest != null && hypot((closest.second.x - event.x).toDouble(), (closest.second.y - event.y).toDouble()) < 60.0 * dp) {
                         selected = closest.first.name
-                        lastInfo = System.currentTimeMillis()
                         onSelect?.invoke(info(closest.first, Astro.jd(now())))
                     } else {
                         selected = null

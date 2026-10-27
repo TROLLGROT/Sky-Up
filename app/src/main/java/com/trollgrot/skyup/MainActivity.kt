@@ -35,6 +35,8 @@ import kotlin.math.sqrt
 class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var sky: SkyView
     private lateinit var info: TextView
+    private lateinit var detailSheet: FrameLayout
+    private lateinit var starArt: View
     private lateinit var sm: SensorManager
     private lateinit var root: FrameLayout
     private lateinit var settingsOverlay: FrameLayout
@@ -85,12 +87,15 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         window.navigationBarColor = 0xFF06152B.toInt()
 
         L.ru = prefs.getString("lang", "ru") == "ru"
+        if (!prefs.getBoolean("display_defaults_v04", false)) {
+            prefs.edit().putBoolean("ground", false).putBoolean("day", false).putBoolean("display_defaults_v04", true).apply()
+        }
         night = nightAt(prefs.getFloat("lat", 0f).toDouble(), prefs.getFloat("lon", 0f).toDouble(), prefs.contains("lat"))
         Catalog.load(this)
         sky = SkyView(this).apply {
             showConstellations = prefs.getBoolean("cons", true); showConNames = prefs.getBoolean("conNames", true)
-            showGround = prefs.getBoolean("ground", true); showGrid = prefs.getBoolean("grid", false)
-            daylightSky = prefs.getBoolean("day", true); nightMode = prefs.getBoolean("night", false)
+            showGround = prefs.getBoolean("ground", false); showGrid = prefs.getBoolean("grid", false)
+            daylightSky = prefs.getBoolean("day", false); nightMode = prefs.getBoolean("night", false)
             starLimit = prefs.getFloat("starLimit2", 6.3f).toDouble()
             drawStarNames = prefs.getBoolean("star_names", true)
             drawPlanetNames = prefs.getBoolean("planet_names", true)
@@ -105,15 +110,16 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             textSize = 14f
             setLineSpacing(dp(3).toFloat(), 1f)
             setPadding(dp(16), dp(12), dp(16), dp(12))
-            background = roundedGradient(0xE6102D52.toInt(), 0xE91B477A.toInt(), 16)
-            visibility = View.GONE
+            setPadding(dp(20), dp(12), dp(20), dp(24))
         }
         sky.onSelect = { message ->
-            info.visibility = if (message == null) View.GONE else View.VISIBLE
-            if (message != null) info.text = message
+            detailSheet.visibility = if (message == null) View.GONE else View.VISIBLE
+            if (message != null) { info.text = message; starArt.tag = message; starArt.invalidate() }
         }
-        root.addView(info, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
-            setMargins(dp(14), 0, dp(14), dp(14))
+        detailSheet = makeDetailSheet()
+        detailSheet.visibility = View.GONE
+        root.addView(detailSheet, FrameLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.76f).toInt(), Gravity.BOTTOM).apply {
+            setMargins(dp(8), 0, dp(8), dp(8))
         })
 
         root.addView(makeTopBar(), FrameLayout.LayoutParams(-1, dp(68), Gravity.TOP))
@@ -229,7 +235,13 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         trackCalibration(q)
         if (useGame && haveMag && psiN > 0) applyPsi() else rg.copyInto(rot)
         sky.rot = rot
-        sky.postInvalidateOnAnimation()
+        // Sensor updates can arrive at 60–120 Hz. Rendering the expensive sky scene
+        // faster than 30 fps does not improve orientation tracking perceptibly.
+        val frameNow = android.os.SystemClock.uptimeMillis()
+        if (frameNow - lastSkyFrameAt >= 33L) {
+            lastSkyFrameAt = frameNow
+            sky.postInvalidateOnAnimation()
+        }
     }
 
     private fun updatePsi() {
@@ -246,6 +258,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         psiN++
     }
+
+    private var lastSkyFrameAt = 0L
 
     private fun applyPsi() {
         val c = kotlin.math.cos(psi).toFloat(); val s = kotlin.math.sin(psi).toFloat()
@@ -544,6 +558,73 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         return controls
     }
 
+    private fun makeDetailSheet(): FrameLayout {
+        val sheet = FrameLayout(this).apply {
+            setBackgroundColor(0xF20A1A31.toInt())
+            background = roundedGradient(0xF20D2B52.toInt(), 0xF21B426B.toInt(), 26)
+            elevation = dp(20).toFloat()
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+        }
+        val handle = TextView(this).apply {
+            text = "━━━━━━   ${L.t("SWIPE DOWN TO CLOSE", "СВАЙПНИТЕ ВНИЗ, ЧТОБЫ ЗАКРЫТЬ")}"
+            gravity = Gravity.CENTER
+            textSize = 11f
+            setTextColor(0xFFB5D7F2.toInt())
+            setPadding(0, dp(8), 0, dp(12))
+        }
+        var startY = 0f
+        handle.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> { startY = event.rawY; true }
+                android.view.MotionEvent.ACTION_UP -> {
+                    if (event.rawY - startY > dp(48)) { sky.clearSelection(); detailSheet.visibility = View.GONE }
+                    true
+                }
+                else -> true
+            }
+        }
+        content.addView(handle, LinearLayout.LayoutParams(-1, dp(42)))
+        starArt = object : View(this) {
+            private val artPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+            override fun onDraw(canvas: android.graphics.Canvas) {
+                super.onDraw(canvas)
+                val cx = width / 2f; val cy = height / 2f
+                canvas.drawColor(0xFF091526.toInt())
+                val detail = (tag as? String).orEmpty()
+                val core = when {
+                    detail.contains("M1") || detail.contains("M2") -> 0xFFFF7256.toInt()
+                    detail.contains("K0") || detail.contains("K1") || detail.contains("K5") -> 0xFFFFB45E.toInt()
+                    detail.contains("B0") || detail.contains("B1") || detail.contains("B6") || detail.contains("B7") || detail.contains("B8") -> 0xFF8FCBFF.toInt()
+                    detail.contains("A0") || detail.contains("A1") || detail.contains("A2") || detail.contains("A3") || detail.contains("A7") || detail.contains("A9") -> 0xFFE6F2FF.toInt()
+                    else -> 0xFFFFE6A0.toInt()
+                }
+                val halo = when (core) {
+                    0xFFFF7256.toInt() -> 0xFFFF4B31.toInt()
+                    0xFFFFB45E.toInt() -> 0xFFFF8C32.toInt()
+                    0xFF8FCBFF.toInt() -> 0xFF329EFF.toInt()
+                    0xFFE6F2FF.toInt() -> 0xFF82BFFF.toInt()
+                    else -> 0xFFFFA33B.toInt()
+                }
+                artPaint.shader = android.graphics.RadialGradient(cx, cy, dp(72).toFloat(),
+                    intArrayOf(core, halo, 0x00000000), null, android.graphics.Shader.TileMode.CLAMP)
+                canvas.drawCircle(cx, cy, dp(68).toFloat(), artPaint)
+                artPaint.shader = null
+                artPaint.color = core
+                canvas.drawCircle(cx, cy, dp(28).toFloat(), artPaint)
+                artPaint.color = 0xFFB6D7F2.toInt(); artPaint.textSize = dp(11).toFloat(); artPaint.textAlign = android.graphics.Paint.Align.CENTER
+                canvas.drawText(L.t("SCHEMATIC STAR ILLUSTRATION", "СХЕМАТИЧНОЕ ИЗОБРАЖЕНИЕ ЗВЕЗДЫ"), cx, height - dp(12).toFloat(), artPaint)
+            }
+        }
+        starArt.background = roundedGradient(0xFF091526.toInt(), 0xFF122744.toInt(), 20)
+        content.addView(starArt, LinearLayout.LayoutParams(-1, dp(190)))
+        content.addView(ScrollView(this).apply { addView(info) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        sheet.addView(content, FrameLayout.LayoutParams(-1, -1))
+        return sheet
+    }
+
     private fun makeSettingsOverlay(): FrameLayout {
         val overlay = FrameLayout(this).apply {
             setBackgroundColor(0x99020B18.toInt())
@@ -561,7 +642,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             gravity = Gravity.CENTER_VERTICAL
         }
         val heading = TextView(this).apply {
-            text = "Settings"
+            text = L.t("Settings", "Настройки")
             textSize = 22f
             setTextColor(Color.WHITE)
             setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -576,14 +657,32 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         header.addView(close, LinearLayout.LayoutParams(dp(42), dp(42)))
         panel.addView(header)
-        panel.addView(sectionLabel(L.t("COMPASS", "КОМПАС")), topMargin())
+        val pages = listOf(LinearLayout(this), LinearLayout(this), LinearLayout(this))
+        pages.forEach { it.orientation = LinearLayout.VERTICAL }
+        val content = FrameLayout(this)
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun showPage(index: Int) {
+            content.removeAllViews()
+            content.addView(ScrollView(this).apply { addView(pages[index]) }, FrameLayout.LayoutParams(-1, -1))
+        }
+        listOf(L.t("GENERAL", "ОБЩЕЕ"), L.t("SKY", "НЕБО"), L.t("STARS", "ЗВЁЗДЫ")).forEachIndexed { index, title ->
+            tabs.addView(Button(this).apply {
+                text = title; isAllCaps = false; textSize = 11f; setTextColor(Color.WHITE)
+                background = roundedGradient(0xFF17518A.toInt(), 0xFF287FC0.toInt(), 16)
+                setOnClickListener { showPage(index) }
+            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(5) })
+        }
+        panel.addView(tabs, topMargin())
+        panel.addView(content, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(6) })
+        val general = pages[0]; val skyPage = pages[1]; val starsPage = pages[2]
+        general.addView(sectionLabel(L.t("COMPASS", "КОМПАС")), topMargin())
         val hint = TextView(this).apply {
             text = L.t("Recalibrate when the compass feels inaccurate. Move the phone slowly in a figure‑8 after resetting.", "Если компас врёт — нажмите и медленно опишите телефоном восьмёрку.")
             setTextColor(0xFFD7ECFF.toInt())
             textSize = 12f
             setLineSpacing(dp(2).toFloat(), 1f)
         }
-        panel.addView(hint, topMargin())
+        general.addView(hint, topMargin())
         val recalibrate = Button(this).apply {
             text = L.t("⟳   RECALIBRATE COMPASS", "⟳   ПЕРЕКАЛИБРОВАТЬ КОМПАС")
             isAllCaps = false
@@ -592,15 +691,15 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             background = roundedGradient(0xFF1478B9.toInt(), 0xFF48A7E4.toInt(), 18)
             setOnClickListener { recalibrateCompass() }
         }
-        panel.addView(recalibrate, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
-        panel.addView(sectionLabel(L.t("DISPLAY", "ЭКРАН")), topMargin())
+        general.addView(recalibrate, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
+        general.addView(sectionLabel(L.t("DISPLAY", "ЭКРАН")), topMargin())
 
         fovValue = TextView(this).apply {
             setTextColor(paleBlue)
             textSize = 13f
             text = L.t("Field of view: ", "Поле зрения: ") + "${sky.fovDeg.toInt()}°"
         }
-        panel.addView(fovValue, topMargin())
+        general.addView(fovValue, topMargin())
         val fovSeek = SeekBar(this).apply {
             max = 55
             progress = (sky.fovDeg.toInt() - 5).coerceIn(0, 55)
@@ -616,35 +715,49 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 override fun onStopTrackingTouch(seekBar: SeekBar?) { }
             })
         }
-        panel.addView(fovSeek, topMargin())
+        general.addView(fovSeek, topMargin())
+        general.addView(sectionLabel(L.t("LANGUAGE", "ЯЗЫК")), topMargin())
+        val langRow = LinearLayout(this)
+        for ((code, label) in listOf("ru" to "Русский", "en" to "English")) langRow.addView(Button(this).apply {
+            text = label; isAllCaps = false; setTextColor(Color.WHITE)
+            background = roundedGradient(if ((code == "ru") == L.ru) 0xFF1478B9.toInt() else 0xFF153D69.toInt(), if ((code == "ru") == L.ru) 0xFF48A7E4.toInt() else 0xFF205B8C.toInt(), 18)
+            setOnClickListener { prefs.edit().putString("lang", code).apply(); recreate() }
+        }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(6) })
+        general.addView(langRow, topMargin())
 
-        panel.addView(sectionLabel(L.t("SKY APPEARANCE", "ВИД НЕБА")), topMargin())
-        addSettingSwitch(panel, L.t("Star names", "Названия звёзд"), sky.drawStarNames) { value ->
+        skyPage.addView(sectionLabel(L.t("SKY APPEARANCE", "ВИД НЕБА")), topMargin())
+        addSettingSwitch(starsPage, L.t("Star names", "Названия звёзд"), sky.drawStarNames) { value ->
             sky.drawStarNames = value
             prefs.edit().putBoolean("star_names", value).apply()
             sky.invalidate()
         }
-        addSettingSwitch(panel, L.t("Planet names", "Названия планет"), sky.drawPlanetNames) { value ->
+        addSettingSwitch(skyPage, L.t("Planet names", "Названия планет"), sky.drawPlanetNames) { value ->
             sky.drawPlanetNames = value
             prefs.edit().putBoolean("planet_names", value).apply()
             sky.invalidate()
         }
-        addSettingSwitch(panel, L.t("Detailed planet surfaces", "Детальные поверхности планет"), sky.drawPlanetDetails) { value ->
+        addSettingSwitch(skyPage, L.t("Detailed planet surfaces", "Детальные поверхности планет"), sky.drawPlanetDetails) { value ->
             sky.drawPlanetDetails = value
             prefs.edit().putBoolean("planet_details", value).apply()
             sky.invalidate()
         }
 
-        fun sw(key: String, en: String, ru: String, def: Boolean, set: (Boolean) -> Unit) = addSettingSwitch(panel, L.t(en, ru), prefs.getBoolean(key, def)) { v -> set(v); prefs.edit().putBoolean(key, v).apply(); sky.invalidate() }
-        sw("cons", "Constellation lines", "Линии созвездий", true) { sky.showConstellations = it }
-        sw("conNames", "Constellation names", "Названия созвездий", true) { sky.showConNames = it }
-        sw("ground", "Horizon and ground", "Горизонт и земля", true) { sky.showGround = it }
-        sw("grid", "Altitude/azimuth grid", "Сетка высота/азимут", false) { sky.showGrid = it }
-        sw("day", "Realistic daylight sky", "Реалистичное дневное небо", true) { sky.daylightSky = it }
-        sw("night", "Night (red) mode", "Ночной (красный) режим", false) { sky.nightMode = it }
+        fun sw(page: LinearLayout, key: String, en: String, ru: String, def: Boolean, set: (Boolean) -> Unit) = addSettingSwitch(page, L.t(en, ru), prefs.getBoolean(key, def)) { v -> set(v); prefs.edit().putBoolean(key, v).apply(); sky.invalidate() }
+        sw(skyPage, "cons", "Constellation lines", "Линии созвездий", true) { sky.showConstellations = it }
+        sw(skyPage, "conNames", "Constellation names", "Названия созвездий", true) { sky.showConNames = it }
+        sw(skyPage, "ground", "Horizon and ground", "Горизонт и земля", false) { sky.showGround = it }
+        sw(skyPage, "grid", "Altitude/azimuth grid", "Сетка высота/азимут", false) { sky.showGrid = it }
+        sw(skyPage, "day", "Realistic daylight sky", "Реалистичное дневное небо", false) { sky.daylightSky = it }
+        sw(skyPage, "night", "Night (red) mode", "Ночной (красный) режим", false) { sky.nightMode = it }
+        starsPage.addView(sectionLabel(L.t("STAR CATALOG", "КАТАЛОГ ЗВЁЗД")), topMargin())
+        starsPage.addView(TextView(this).apply {
+            text = L.t("The catalog is based on Hipparcos positions and brightness. Physical reference data is shown for selected well-studied stars; unavailable values are left blank.", "Каталог использует координаты и яркость Hipparcos. Справочные физические данные приведены для ряда хорошо изученных звёзд; отсутствующие значения не подменяются догадками.")
+            setTextColor(0xFFD7ECFF.toInt()); textSize = 12f; setLineSpacing(dp(2).toFloat(), 1f)
+        }, topMargin())
+        starsPage.addView(sectionLabel(L.t("VISIBILITY", "ОТОБРАЖЕНИЕ")), topMargin())
         val starTxt = TextView(this).apply { setTextColor(paleBlue); textSize = 13f; text = L.t("Faintest star shown: ", "Самая слабая звезда: ") + "%.1f".format(sky.starLimit) }
-        panel.addView(starTxt, topMargin())
-        panel.addView(SeekBar(this).apply {
+        starsPage.addView(starTxt, topMargin())
+        starsPage.addView(SeekBar(this).apply {
             max = 45; progress = ((sky.starLimit - 2) * 10).toInt().coerceIn(0, 45)
             progressTintList = android.content.res.ColorStateList.valueOf(lightBlue); thumbTintList = android.content.res.ColorStateList.valueOf(paleBlue)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -653,14 +766,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 override fun onStopTrackingTouch(sb: SeekBar?) { }
             })
         }, topMargin())
-        panel.addView(sectionLabel(L.t("LANGUAGE", "ЯЗЫК")), topMargin())
-        val langRow = LinearLayout(this)
-        for ((code, label) in listOf("ru" to "Русский", "en" to "English")) langRow.addView(Button(this).apply {
-            text = label; isAllCaps = false; setTextColor(Color.WHITE)
-            background = roundedGradient(if ((code == "ru") == L.ru) 0xFF1478B9.toInt() else 0xFF153D69.toInt(), if ((code == "ru") == L.ru) 0xFF48A7E4.toInt() else 0xFF205B8C.toInt(), 18)
-            setOnClickListener { prefs.edit().putString("lang", code).apply(); recreate() }
-        }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(6) })
-        panel.addView(langRow, topMargin())
 
         val reset = Button(this).apply {
             text = L.t("RESET ZOOM", "СБРОС МАСШТАБА")
@@ -673,9 +778,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 fovSeek.progress = 55
             }
         }
-        panel.addView(reset, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(8) })
+        general.addView(reset, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(8) })
 
-        overlay.addView(ScrollView(this).apply { addView(panel) }, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply {
+        showPage(0)
+        overlay.addView(panel, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER).apply {
             setMargins(dp(22), dp(20), dp(22), dp(20))
         })
         return overlay
