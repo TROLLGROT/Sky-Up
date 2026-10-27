@@ -235,13 +235,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         trackCalibration(q)
         if (useGame && haveMag && psiN > 0) applyPsi() else rg.copyInto(rot)
         sky.rot = rot
-        // Sensor updates can arrive at 60–120 Hz. Rendering the expensive sky scene
-        // faster than 30 fps does not improve orientation tracking perceptibly.
-        val frameNow = android.os.SystemClock.uptimeMillis()
-        if (frameNow - lastSkyFrameAt >= 33L) {
-            lastSkyFrameAt = frameNow
-            sky.postInvalidateOnAnimation()
-        }
+        // Share the frame limiter with dwell selection and pinch gestures.
+        sky.requestFrame()
     }
 
     private fun updatePsi() {
@@ -258,8 +253,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         psiN++
     }
-
-    private var lastSkyFrameAt = 0L
 
     private fun applyPsi() {
         val c = kotlin.math.cos(psi).toFloat(); val s = kotlin.math.sin(psi).toFloat()
@@ -608,14 +601,55 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                     0xFFE6F2FF.toInt() -> 0xFF82BFFF.toInt()
                     else -> 0xFFFFA33B.toInt()
                 }
-                artPaint.shader = android.graphics.RadialGradient(cx, cy, dp(72).toFloat(),
-                    intArrayOf(core, halo, 0x00000000), null, android.graphics.Shader.TileMode.CLAMP)
-                canvas.drawCircle(cx, cy, dp(68).toFloat(), artPaint)
+                val isRedGiant = detail.contains("M1") || detail.contains("M2")
+                val isGiant = detail.contains(" III") || detail.contains(" Ia") || detail.contains(" Ib")
+                val radius = dp(if (isRedGiant) 68 else if (isGiant) 61 else 54).toFloat()
+                artPaint.shader = android.graphics.RadialGradient(cx, cy, radius * 1.55f,
+                    intArrayOf((0x44 shl 24) or (halo and 0x00FFFFFF), (0x1C shl 24) or (halo and 0x00FFFFFF), 0x00000000), null, android.graphics.Shader.TileMode.CLAMP)
+                canvas.drawCircle(cx, cy, radius * 1.55f, artPaint)
                 artPaint.shader = null
-                artPaint.color = core
-                canvas.drawCircle(cx, cy, dp(28).toFloat(), artPaint)
+                val sphere = android.graphics.Path().apply { addCircle(cx, cy, radius, android.graphics.Path.Direction.CW) }
+                canvas.save()
+                canvas.clipPath(sphere)
+                artPaint.shader = android.graphics.RadialGradient(cx - radius * 0.32f, cy - radius * 0.38f, radius * 1.65f,
+                    intArrayOf(0xFFFFFFFF.toInt(), core, halo, 0xFF160F1B.toInt()), floatArrayOf(0f, 0.38f, 0.76f, 1f), android.graphics.Shader.TileMode.CLAMP)
+                canvas.drawCircle(cx, cy, radius, artPaint)
+                artPaint.shader = null
+
+                // Low-frequency granulation gives the stellar disc texture without a
+                // downloaded bitmap, and this view redraws only when a star is selected.
+                val seed = detail.substringBefore('·').hashCode().toLong()
+                val random = java.util.Random(seed)
+                val surfacePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                repeat(150) {
+                    val angle = random.nextDouble() * Math.PI * 2
+                    val distance = kotlin.math.sqrt(random.nextDouble()) * radius * 0.92
+                    val x = cx + kotlin.math.cos(angle).toFloat() * distance.toFloat()
+                    val y = cy + kotlin.math.sin(angle).toFloat() * distance.toFloat()
+                    val size = (if (isRedGiant) 1.2 + random.nextDouble() * 6.0 else 0.7 + random.nextDouble() * 3.6) * dp
+                    val alpha = 18 + random.nextInt(46)
+                    val shade = if (random.nextBoolean()) core else halo
+                    surfacePaint.color = (alpha shl 24) or (shade and 0x00FFFFFF)
+                    canvas.drawOval(x - size.toFloat(), y - size.toFloat() * 0.62f, x + size.toFloat(), y + size.toFloat() * 0.62f, surfacePaint)
+                }
+                artPaint.shader = android.graphics.RadialGradient(cx - radius * 0.28f, cy - radius * 0.35f, radius * 1.42f,
+                    intArrayOf(0x00FFFFFF, 0x00101018, 0x9C080914.toInt()), floatArrayOf(0.42f, 0.7f, 1f), android.graphics.Shader.TileMode.CLAMP)
+                canvas.drawCircle(cx, cy, radius, artPaint)
+                artPaint.shader = null
+                canvas.restore()
+                artPaint.color = 0x66FFFFFF
+                canvas.drawCircle(cx - radius * 0.33f, cy - radius * 0.4f, radius * 0.12f, artPaint)
+
+                if (detail.contains("белый карлик") || detail.contains("white dwarf")) {
+                    artPaint.shader = android.graphics.RadialGradient(cx + radius * 1.02f, cy + radius * 0.48f, dp(17).toFloat(),
+                        intArrayOf(0xFFEAF6FF.toInt(), 0xFF73B9FF.toInt(), 0x0073B9FF), null, android.graphics.Shader.TileMode.CLAMP)
+                    canvas.drawCircle(cx + radius * 1.02f, cy + radius * 0.48f, dp(17).toFloat(), artPaint)
+                    artPaint.shader = null
+                    artPaint.color = 0xFFEAF6FF.toInt()
+                    canvas.drawCircle(cx + radius * 1.02f, cy + radius * 0.48f, dp(5).toFloat(), artPaint)
+                }
                 artPaint.color = 0xFFB6D7F2.toInt(); artPaint.textSize = dp(11).toFloat(); artPaint.textAlign = android.graphics.Paint.Align.CENTER
-                canvas.drawText(L.t("SCHEMATIC STAR ILLUSTRATION", "СХЕМАТИЧНОЕ ИЗОБРАЖЕНИЕ ЗВЕЗДЫ"), cx, height - dp(12).toFloat(), artPaint)
+                canvas.drawText(L.t("STELLAR SURFACE MODEL · NOT TO SCALE", "МОДЕЛЬ ЗВЁЗДНОЙ ПОВЕРХНОСТИ · НЕ В МАСШТАБЕ"), cx, height - dp(12).toFloat(), artPaint)
             }
         }
         starArt.background = roundedGradient(0xFF091526.toInt(), 0xFF122744.toInt(), 20)

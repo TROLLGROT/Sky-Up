@@ -33,6 +33,8 @@ class SkyView(ctx: Context) : View(ctx) {
     private var traceName: String? = null
     private var traceJd = 0.0
     private val trace = ArrayList<DoubleArray>()
+    private val traceLabels = ArrayList<String?>()
+    private val tracePath = Path()
     private val timeFmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
     private val quad = Path()
     private val quadCoords = FloatArray(8)
@@ -52,9 +54,9 @@ class SkyView(ctx: Context) : View(ctx) {
     private var cachedBodiesJd = Double.NaN
     private var eclipticCacheJd = Double.NaN
     private var eclipticCache: List<DoubleArray> = emptyList()
-    fun select(name: String) {
+    fun select(name: String, openDetails: Boolean = true) {
         selected = name; val jd = Astro.jd(now())
-        Astro.all(jd).firstOrNull { it.name == name }?.let { onSelect?.invoke(info(it, jd)) }
+        if (openDetails) Astro.all(jd).firstOrNull { it.name == name }?.let { onSelect?.invoke(info(it, jd)) }
         invalidate()
     }
     var onSelect: ((String?) -> Unit)? = null
@@ -63,7 +65,33 @@ class SkyView(ctx: Context) : View(ctx) {
     private val dp = ctx.resources.displayMetrics.density
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL) }
-    private val hits = ArrayList<Pair<Body, Projected>>()
+    private data class Hit(var body: Body, var x: Float, var y: Float)
+    private val hits = ArrayList<Hit>()
+    private var hitCount = 0
+    private val frameIntervalMs = 33L
+    private var lastFrameRequestAt = 0L
+    private var frameRequestQueued = false
+    private val queuedFrameRequest = Runnable {
+        frameRequestQueued = false
+        lastFrameRequestAt = android.os.SystemClock.uptimeMillis()
+        postInvalidateOnAnimation()
+    }
+    fun requestFrame() {
+        val now = android.os.SystemClock.uptimeMillis()
+        val delay = frameIntervalMs - (now - lastFrameRequestAt)
+        if (delay <= 0L) {
+            lastFrameRequestAt = now
+            postInvalidateOnAnimation()
+        } else if (!frameRequestQueued) {
+            frameRequestQueued = true
+            postDelayed(queuedFrameRequest, delay)
+        }
+    }
+    private fun addHit(body: Body, x: Float, y: Float) {
+        if (hitCount == hits.size) hits.add(Hit(body, x, y))
+        else hits[hitCount].apply { this.body = body; this.x = x; this.y = y }
+        hitCount++
+    }
     private var downX = 0f
     private var downY = 0f
     private var gestureScaling = false
@@ -71,7 +99,7 @@ class SkyView(ctx: Context) : View(ctx) {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
             gestureScaling = true
             fovDeg = (fovDeg / detector.scaleFactor.toDouble()).coerceIn(MIN_FOV, MAX_FOV)
-            invalidate()
+            requestFrame()
             return true
         }
     })
@@ -157,7 +185,7 @@ class SkyView(ctx: Context) : View(ctx) {
         drawHorizonAndEcliptic(canvas, focal, julianDay, ::project)
         drawCardinalPoints(canvas, focal)
 
-        hits.clear()
+        hitCount = 0
         val zoom = (ln(MAX_FOV / fovDeg) / ln(12.0)).coerceIn(0.0, 1.0).toFloat()
         drawStars(canvas, julianDay, focal, zoom, starFade)
         for (body in bodies) {
@@ -185,7 +213,7 @@ class SkyView(ctx: Context) : View(ctx) {
                 canvas.drawText(L.name(body.name), point.x + radius + 4f * dp, point.y - 2f * dp, textPaint)
                 textPaint.clearShadowLayer()
             }
-            hits.add(body to point)
+            addHit(body, point.x, point.y)
 
             if (body.name == selected) {
                 p.shader = null
@@ -359,7 +387,7 @@ class SkyView(ctx: Context) : View(ctx) {
                 textPaint.setShadowLayer(4f * dp, 0f, 0f, 0xBB6DBBFF.toInt())
                 c.drawText(L.name(b.name), x + rad + 4f * dp, y - 2f * dp, textPaint); textPaint.clearShadowLayer()
             }
-            if (b.mag <= 5.0 || isSel) hits.add(b to Projected(x, y, Math.toDegrees(asin(uu.coerceIn(-1.0, 1.0)))))
+            if (b.mag <= 5.0 || isSel) addHit(b, x, y)
             if (isSel) {
                 p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 1.8f * dp; p.color = 0xFF9BE7FF.toInt()
                 c.drawCircle(x, y, rad + 8f * dp, p); p.style = Paint.Style.FILL
@@ -376,7 +404,12 @@ class SkyView(ctx: Context) : View(ctx) {
     private fun updateDwell(c: Canvas) {
         val cx = width / 2f; val cy = height / 2f; val lim = 30.0 * dp
         var best: Body? = null; var bs = Double.POSITIVE_INFINITY
-        for ((b, q) in hits) { val d = hypot((q.x - cx).toDouble(), (q.y - cy).toDouble()); if (d > lim) continue; val sc = d - (if (b.mag < 2.5) 12.0 * dp else 0.0); if (sc < bs) { bs = sc; best = b } }
+        for (i in 0 until hitCount) {
+            val hit = hits[i]; val d = hypot((hit.x - cx).toDouble(), (hit.y - cy).toDouble())
+            if (d > lim) continue
+            val sc = d - (if (hit.body.mag < 2.5) 12.0 * dp else 0.0)
+            if (sc < bs) { bs = sc; best = hit.body }
+        }
         val nm = best?.name; val t = System.currentTimeMillis()
         if (nm != dwellName) { dwellName = nm; dwellStart = t }
         if (nm != null && nm != selected) {
@@ -384,7 +417,7 @@ class SkyView(ctx: Context) : View(ctx) {
             p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 2.5f * dp; p.color = 0xFF9BE7FF.toInt()
             dwellRect.set(cx - 18 * dp, cy - 18 * dp, cx + 18 * dp, cy + 18 * dp)
             c.drawArc(dwellRect, -90f, 360f * pr, false, p); p.style = Paint.Style.FILL
-            if (pr >= 1f) select(nm) else postInvalidateOnAnimation()
+            if (pr >= 1f) select(nm, openDetails = false) else requestFrame()
         }
     }
 
@@ -592,10 +625,10 @@ class SkyView(ctx: Context) : View(ctx) {
         var prev = Astro.altAz(b.ra, b.dec, lat, lon, jd).first
         for (k in 1..144) {
             val j = jd + k / 144.0; val a = Astro.altAz(b.ra, b.dec, lat, lon, j).first
-            val t = timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong()))
-            if (prev < 0 && a >= 0 && rise == null) rise = t
-            if (prev >= 0 && a < 0 && set == null) set = t
+            if (prev < 0 && a >= 0 && rise == null) rise = timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong()))
+            if (prev >= 0 && a < 0 && set == null) set = timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong()))
             prev = a
+            if (rise != null && set != null) break
         }
         return L.t("Rise ", "Восход ") + (rise ?: "—") + "   " + L.t("Set ", "Закат ") + (set ?: "—")
     }
@@ -753,27 +786,35 @@ class SkyView(ctx: Context) : View(ctx) {
     private fun drawTrace(c: Canvas, f: Float, jd: Double, bodies: List<Body>) {
         val name = selected ?: return
         if (traceName != name || abs(jd - traceJd) > 0.03) {
-            traceName = name; traceJd = jd; trace.clear()
+            traceName = name; traceJd = jd; trace.clear(); traceLabels.clear()
             val star = Astro.starByName(jd, name)
-            for (k in 0..288) {
-                val j = jd + k * 5.0 / 1440
+            // Twenty-minute samples are smooth enough for a day-long path and avoid
+            // hundreds of repeated planetary ephemeris calculations after selection.
+            for (k in 0..72) {
+                val j = jd + k * 20.0 / 1440
                 val b = star ?: Astro.all(j, false).firstOrNull { it.name == name } ?: return
-                val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, j); trace.add(doubleArrayOf(alt, az, j))
+                val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, j); trace.add(doubleArrayOf(alt, az))
+                traceLabels.add(if (k % 3 == 0) timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong())) else null)
             }
         }
-        var pr: Projected? = null
-        for ((k, t) in trace.withIndex()) {
-            val q = projectAzAlt(t[1], t[0], f)
-            if (q != null) {
-                val a = if (t[0] < 0) 70 else 230
-                if (pr != null) { p.style = Paint.Style.STROKE; p.strokeWidth = 0.8f * dp; p.color = withAlpha(0xFF9BE7FF.toInt(), a / 3); c.drawLine(pr.x, pr.y, q.x, q.y, p) }
+        tracePath.rewind()
+        var prevOk = false
+        for (k in trace.indices) {
+            val t = trace[k]
+            if (!projectAzAltInto(t[1], t[0], f, quadCoords, 0)) { prevOk = false; continue }
+            val x = quadCoords[0]; val y = quadCoords[1]
+            if (prevOk) tracePath.lineTo(x, y) else tracePath.moveTo(x, y)
+            if (k % 3 == 0) {
+                val a = if (t[0] < 0) 110 else 230
                 p.style = Paint.Style.FILL; p.color = withAlpha(0xFF9BE7FF.toInt(), a)
-                val hour = k % 12 == 0
-                c.drawCircle(q.x, q.y, (if (hour) 3.2f else 1.5f) * dp, p)
-                if (hour) { textPaint.textSize = 10f * dp; textPaint.color = withAlpha(0xFFD8F3FF.toInt(), a); c.drawText(timeFmt.format(java.util.Date(((t[2] - 2440587.5) * 86400000).toLong())), q.x + 6 * dp, q.y - 6 * dp, textPaint) }
+                c.drawCircle(x, y, 3.2f * dp, p)
+                textPaint.textSize = 10f * dp; textPaint.color = withAlpha(0xFFD8F3FF.toInt(), a)
+                traceLabels[k]?.let { c.drawText(it, x + 6 * dp, y - 6 * dp, textPaint) }
             }
-            pr = q
+            prevOk = true
         }
+        p.style = Paint.Style.STROKE; p.strokeWidth = 1.1f * dp; p.color = withAlpha(0xFF9BE7FF.toInt(), 155)
+        c.drawPath(tracePath, p); p.style = Paint.Style.FILL
     }
 
     /** Edge arrow pointing to the selected object when it is outside the field of view. */
@@ -805,10 +846,15 @@ class SkyView(ctx: Context) : View(ctx) {
             MotionEvent.ACTION_POINTER_DOWN -> gestureScaling = true
             MotionEvent.ACTION_UP -> {
                 if (!gestureScaling && !scaleDetector.isInProgress && hypot((event.x - downX).toDouble(), (event.y - downY).toDouble()) < 20.0 * dp) {
-                    val closest = hits.minByOrNull { hypot((it.second.x - event.x).toDouble(), (it.second.y - event.y).toDouble()) }
-                    if (closest != null && hypot((closest.second.x - event.x).toDouble(), (closest.second.y - event.y).toDouble()) < 60.0 * dp) {
-                        selected = closest.first.name
-                        onSelect?.invoke(info(closest.first, Astro.jd(now())))
+                    var closest: Hit? = null; var closestDistance = Double.POSITIVE_INFINITY
+                    for (i in 0 until hitCount) {
+                        val candidate = hits[i]
+                        val distance = hypot((candidate.x - event.x).toDouble(), (candidate.y - event.y).toDouble())
+                        if (distance < closestDistance) { closest = candidate; closestDistance = distance }
+                    }
+                    if (closest != null && closestDistance < 60.0 * dp) {
+                        selected = closest.body.name
+                        onSelect?.invoke(info(closest.body, Astro.jd(now())))
                     } else {
                         selected = null
                         onSelect?.invoke(null)
