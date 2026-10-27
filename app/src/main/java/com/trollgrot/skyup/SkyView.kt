@@ -27,6 +27,8 @@ class SkyView(ctx: Context) : View(ctx) {
     var drawStarNames = true
     var drawPlanetNames = true
     var drawPlanetDetails = true
+    var manualMode = false
+        private set
     var showConstellations = true; var showConNames = true; var showGrid = false; var showGround = false
     var daylightSky = false; var nightMode = false; var starLimit = 5.5
     var timeOffset = 0L
@@ -39,6 +41,10 @@ class SkyView(ctx: Context) : View(ctx) {
     private val trace = ArrayList<DoubleArray>()
     private val traceLabels = ArrayList<String?>()
     private val tracePath = Path()
+    private var forecastName: String? = null
+    private var forecastSecond = Long.MIN_VALUE
+    private var forecastJd = Double.NaN
+    private var forecastBody: Body? = null
     private val timeFmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
     private val quad = Path()
     private val quadCoords = FloatArray(8)
@@ -49,8 +55,6 @@ class SkyView(ctx: Context) : View(ctx) {
         val a = Math.toRadians(i.toDouble())
         0.9 + 0.5 * sin(3 * a + 0.3) + 0.3 * sin(7 * a + 1.7) + 0.18 * sin(17 * a + 4.0)
     }
-    private val dwellRect = RectF()
-    private val arrowPath = Path()
     private var backgroundShader: Shader? = null
     private var backgroundShaderWidth = -1
     private var backgroundShaderHeight = -1
@@ -66,6 +70,10 @@ class SkyView(ctx: Context) : View(ctx) {
     var onSelect: ((String?) -> Unit)? = null
 
     private var selected: String? = null
+    var onControlModeChange: ((Boolean) -> Unit)? = null
+    private val manualRot = FloatArray(9)
+    private val manualScratch = FloatArray(9)
+    private val manualDelta = FloatArray(9)
     private val dp = ctx.resources.displayMetrics.density
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL) }
@@ -75,6 +83,12 @@ class SkyView(ctx: Context) : View(ctx) {
     // Choreographer already coalesces sensor updates to the next display frame.
     // An extra 16 ms timer can land just after vsync and halve the effective FPS.
     fun requestFrame() = postInvalidateOnAnimation()
+    fun toggleControlMode() {
+        manualMode = !manualMode
+        if (manualMode) rot.copyInto(manualRot)
+        onControlModeChange?.invoke(manualMode)
+        requestFrame()
+    }
     private fun addHit(body: Body, x: Float, y: Float) {
         if (hitCount == hits.size) hits.add(Hit(body, x, y))
         else hits[hitCount].apply { this.body = body; this.x = x; this.y = y }
@@ -82,7 +96,10 @@ class SkyView(ctx: Context) : View(ctx) {
     }
     private var downX = 0f
     private var downY = 0f
+    private var lastX = 0f
+    private var lastY = 0f
     private var gestureScaling = false
+    private var gesturePanning = false
     private val scaleDetector = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
             gestureScaling = true
@@ -114,6 +131,11 @@ class SkyView(ctx: Context) : View(ctx) {
         onSelect?.invoke(null)
     }
 
+    fun dismissDetails() {
+        onSelect?.invoke(null)
+        invalidate()
+    }
+
     private fun projectAzAlt(azimuth: Double, altitude: Double, focalLength: Float): Projected? {
         val a = Math.toRadians(azimuth - decl)
         val e = Math.toRadians(altitude)
@@ -130,13 +152,53 @@ class SkyView(ctx: Context) : View(ctx) {
         return Projected((width / 2.0 + k * dx).toFloat(), (height / 2.0 - k * dy).toFloat(), altitude)
     }
 
+    private fun focusAlpha(x: Float, y: Float, focalLength: Float): Float {
+        val distance = hypot((x - width / 2f).toDouble(), (y - height / 2f).toDouble())
+        val angle = Math.toDegrees(2.0 * atan(distance / (2.0 * focalLength)))
+        val t = ((14.0 - angle) / 10.0).coerceIn(0.0, 1.0)
+        return (t * t * (3.0 - 2.0 * t)).toFloat()
+    }
+
+    private fun drawFocusedLabel(c: Canvas, name: String, x: Float, y: Float, radius: Float, focal: Float) {
+        val alpha = (245 * focusAlpha(x, y, focal)).toInt()
+        if (alpha < 3) return
+        textPaint.style = Paint.Style.FILL
+        textPaint.textSize = 12f * dp
+        textPaint.color = withAlpha(0xFFF0F7FF.toInt(), alpha)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.setShadowLayer(5f * dp, 0f, 0f, withAlpha(0xFF59AFFF.toInt(), alpha))
+        c.drawText(L.name(name), x, y - radius - 7f * dp, textPaint)
+        textPaint.clearShadowLayer()
+        textPaint.textAlign = Paint.Align.LEFT
+    }
+
+    private fun panManual(dx: Float, dy: Float) {
+        val degPerPixel = fovDeg / max(1, height).toDouble()
+        val yaw = Math.toRadians(degPerPixel * dx)
+        val pitch = Math.toRadians(degPerPixel * dy)
+        val cy = cos(yaw).toFloat(); val sy = sin(yaw).toFloat()
+        val cp = cos(pitch).toFloat(); val sp = sin(pitch).toFloat()
+        // Camera-space delta Ry(yaw) * Rx(pitch), stored column-major like SensorManager.
+        val a = manualDelta
+        a[0] = cy; a[1] = 0f; a[2] = -sy
+        a[3] = sy * sp; a[4] = cp; a[5] = cy * sp
+        a[6] = sy * cp; a[7] = -sp; a[8] = cy * cp
+        for (col in 0..2) for (row in 0..2) {
+            var value = 0f
+            for (k in 0..2) value += a[k * 3 + row] * manualRot[col * 3 + k]
+            manualScratch[col * 3 + row] = value
+        }
+        manualScratch.copyInto(manualRot)
+        requestFrame()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawColor(0xFF020817.toInt())
         if (width == 0 || height == 0) return
         // Read the atomically published sensor matrix once so every layer in a frame
         // uses the same orientation rather than mixing values from two sensor events.
-        frameRot = rot
+        frameRot = if (manualMode) manualRot else rot
         ensureAzimuthTrigCache()
 
         p.style = Paint.Style.FILL
@@ -179,7 +241,7 @@ class SkyView(ctx: Context) : View(ctx) {
         val zoom = (ln(MAX_FOV / fovDeg) / ln(12.0)).coerceIn(0.0, 1.0).toFloat()
         val catalogStars = Astro.stars(julianDay)
         if (catalogStars.isEmpty()) drawBackgroundStars(canvas, ::project)
-        else drawStars(canvas, catalogStars, focal, zoom, starFade)
+        else drawStars(canvas, catalogStars, focal, starFade)
         for (body in bodies) {
             if (body.type == "Star" && body.mag > starLimit) continue
             val point = project(body.ra, body.dec) ?: continue
@@ -188,23 +250,22 @@ class SkyView(ctx: Context) : View(ctx) {
             if (body.type == "Star" && body.mag > starLimit) continue
             val dim = (0.35f + 0.65f * ((point.alt + 1) / 2).coerceIn(0.0, 1.0).toFloat()) * (if (body.type == "Star") starFade else if (body.name == "Sun") 1f else 1f - day * 0.55f)
             val radius = when (body.name) {
-                "Sun" -> 13f * dp + 2f * dp * zoom
-                "Moon" -> 10f * dp + 5f * dp * zoom
+                "Sun" -> 13f * dp + 5f * dp * zoom
+                "Moon" -> 12f * dp + 12f * dp * zoom
                 else -> if (body.type == "Planet") planetRadius(body.name, zoom) else starRadius(body.mag)
             }
             if (body.name == "Sun") drawSun(canvas, point, radius, dim)
-            else if (body.name == "Moon") drawMoon(canvas, point, radius, dim)
+            else if (body.name == "Moon") {
+                val sun = bodies.first { it.name == "Sun" }
+                val elongation = acos((sun.vx * body.vx + sun.vy * body.vy + sun.vz * body.vz).coerceIn(-1.0, 1.0))
+                val waxing = Astro.norm(body.ra - sun.ra) < 180.0
+                drawMoon(canvas, point, radius, dim, elongation, waxing)
+            }
             else if (body.type == "Planet") { if (radius < 7f * dp) drawGlowPlanet(canvas, body, point, dim) else drawPlanet(canvas, body.name, point, radius, dim, zoom) }
             else drawStar(canvas, point, radius, dim, body.mag, body.bv)
 
-            if (body.type == "Planet" && drawPlanetNames || body.name == "Sun" || body.name == "Moon" || body.type == "Star" && drawStarNames && !body.name.startsWith("HIP") && body.mag < 1.7 + 2.5 * zoom) {
-                textPaint.style = Paint.Style.FILL
-                textPaint.textSize = if (body.type == "Star") 10.5f * dp else 12f * dp
-                textPaint.color = if (body.type == "Star") 0xFFD3E5FF.toInt() else 0xFFF3F8FF.toInt()
-                textPaint.setShadowLayer(4f * dp, 0f, 0f, 0xBB6DBBFF.toInt())
-                canvas.drawText(L.name(body.name), point.x + radius + 4f * dp, point.y - 2f * dp, textPaint)
-                textPaint.clearShadowLayer()
-            }
+            if ((body.name == "Sun" || body.name == "Moon" || body.type == "Planet") && drawPlanetNames)
+                drawFocusedLabel(canvas, body.name, point.x, point.y, radius, focal)
             addHit(body, point.x, point.y)
 
             if (body.name == selected) {
@@ -219,9 +280,6 @@ class SkyView(ctx: Context) : View(ctx) {
 
         if (showGround) drawGround(canvas, focal, day)
         drawTrace(canvas, focal, julianDay, bodies)
-        updateDwell(canvas)
-        drawArrow(canvas, julianDay, bodies)
-        drawCenterReticle(canvas)
         drawStatus(canvas)
         if (nightMode) canvas.drawColor(0xFFFF3020.toInt(), android.graphics.PorterDuff.Mode.MULTIPLY)
     }
@@ -351,7 +409,7 @@ class SkyView(ctx: Context) : View(ctx) {
     private var bufA = FloatArray(0); private var bufB = FloatArray(0); private var bufC = FloatArray(0)
     private val ptPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeCap = Paint.Cap.ROUND; style = Paint.Style.STROKE }
 
-    private fun drawStars(c: Canvas, st: List<Body>, f: Float, zoom: Float, fade: Float) {
+    private fun drawStars(c: Canvas, st: List<Body>, f: Float, fade: Float) {
         if (st.isEmpty()) return
         if (bufA.size < st.size * 2) { bufA = FloatArray(st.size * 2); bufB = FloatArray(st.size * 2); bufC = FloatArray(st.size * 2) }
         var na = 0; var nb = 0; var nc = 0
@@ -374,11 +432,8 @@ class SkyView(ctx: Context) : View(ctx) {
             if (b.mag > 3.3) {
                 if (b.mag < 4.6) { bufA[na++] = x; bufA[na++] = y } else if (b.mag < 5.6) { bufB[nb++] = x; bufB[nb++] = y } else { bufC[nc++] = x; bufC[nc++] = y }
             } else glowPoint(c, x, y, rad * 0.75f, bvColor(b.bv), dim, b.mag < 0.6)
-            if (b.mag < 1.7 + 2.5 * zoom && drawStarNames && !b.name.startsWith("HIP")) {
-                textPaint.style = Paint.Style.FILL; textPaint.textSize = 10.5f * dp; textPaint.color = 0xFFD3E5FF.toInt()
-                textPaint.setShadowLayer(4f * dp, 0f, 0f, 0xBB6DBBFF.toInt())
-                c.drawText(L.name(b.name), x + rad + 4f * dp, y - 2f * dp, textPaint); textPaint.clearShadowLayer()
-            }
+            if (b.mag < 3.0 && drawStarNames && !b.name.startsWith("HIP"))
+                drawFocusedLabel(c, b.name, x, y, rad, f)
             if (b.mag <= 5.0 || isSel) addHit(b, x, y)
             if (isSel) {
                 p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 1.8f * dp; p.color = 0xFF9BE7FF.toInt()
@@ -388,29 +443,6 @@ class SkyView(ctx: Context) : View(ctx) {
         ptPaint.color = withAlpha(0xFFDDE8FF.toInt(), (205 * fade).toInt()); ptPaint.strokeWidth = 2.6f * dp; c.drawPoints(bufA, 0, na, ptPaint)
         ptPaint.color = withAlpha(0xFFDDE8FF.toInt(), (150 * fade).toInt()); ptPaint.strokeWidth = 2.1f * dp; c.drawPoints(bufB, 0, nb, ptPaint)
         ptPaint.color = withAlpha(0xFFDDE8FF.toInt(), (105 * fade).toInt()); ptPaint.strokeWidth = 1.7f * dp; c.drawPoints(bufC, 0, nc, ptPaint)
-    }
-
-    private var dwellName: String? = null
-    private var dwellStart = 0L
-    /** Hold the crosshair on an object for one second to select it. */
-    private fun updateDwell(c: Canvas) {
-        val cx = width / 2f; val cy = height / 2f; val lim = 30.0 * dp
-        var best: Body? = null; var bs = Double.POSITIVE_INFINITY
-        for (i in 0 until hitCount) {
-            val hit = hits[i]; val d = hypot((hit.x - cx).toDouble(), (hit.y - cy).toDouble())
-            if (d > lim) continue
-            val sc = d - (if (hit.body.mag < 2.5) 12.0 * dp else 0.0)
-            if (sc < bs) { bs = sc; best = hit.body }
-        }
-        val nm = best?.name; val t = System.currentTimeMillis()
-        if (nm != dwellName) { dwellName = nm; dwellStart = t }
-        if (nm != null && nm != selected) {
-            val pr = ((t - dwellStart) / 1000f).coerceIn(0f, 1f)
-            p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 2.5f * dp; p.color = 0xFF9BE7FF.toInt()
-            dwellRect.set(cx - 18 * dp, cy - 18 * dp, cx + 18 * dp, cy + 18 * dp)
-            c.drawArc(dwellRect, -90f, 360f * pr, false, p); p.style = Paint.Style.FILL
-            if (pr >= 1f) select(nm, openDetails = false) else requestFrame()
-        }
     }
 
     private fun planetRadius(name: String, zoom: Float): Float {
@@ -424,9 +456,10 @@ class SkyView(ctx: Context) : View(ctx) {
             else -> 4f
         }
         return (base + zoom * when (name) {
-            "Jupiter", "Saturn" -> 9.2f
-            "Venus", "Mars" -> 7.5f
-            else -> 6.6f
+            "Jupiter" -> 24f
+            "Saturn" -> 21f
+            "Venus", "Mars" -> 16f
+            else -> 14f
         }) * dp
     }
 
@@ -444,23 +477,46 @@ class SkyView(ctx: Context) : View(ctx) {
         canvas.drawCircle(point.x - radius * 0.23f, point.y - radius * 0.28f, radius * 0.48f, p)
     }
 
-    private fun drawMoon(canvas: Canvas, point: Projected, radius: Float, dim: Float) {
+    private fun drawMoon(canvas: Canvas, point: Projected, radius: Float, dim: Float, elongation: Double, waxing: Boolean) {
+        val oval = RectF(point.x - radius, point.y - radius, point.x + radius, point.y + radius)
+        val litLimb = (if (waxing) cos(elongation) else -cos(elongation)) * radius
+        val lit = Path().apply {
+            moveTo(point.x, point.y - radius)
+            arcTo(oval, -90f, if (waxing) 180f else -180f, false)
+            cubicTo(point.x + litLimb.toFloat(), point.y + radius * 0.48f,
+                point.x + litLimb.toFloat(), point.y - radius * 0.48f, point.x, point.y - radius)
+            close()
+        }
         p.style = Paint.Style.FILL
-        p.shader = RadialGradient(point.x - radius * 0.3f, point.y - radius * 0.3f, radius * 1.7f,
-            intArrayOf(0xFFFFFFFF.toInt(), 0xFFBFC8D6.toInt(), 0xFF596679.toInt()), null, Shader.TileMode.CLAMP)
+        p.shader = RadialGradient(point.x - radius * 0.25f, point.y - radius * 0.3f, radius * 1.6f,
+            intArrayOf(withAlpha(0xFF9CA9BB.toInt(), (170 * dim).toInt()), withAlpha(0xFF303B4B.toInt(), (220 * dim).toInt()), 0xFF111824.toInt()), null, Shader.TileMode.CLAMP)
         canvas.drawCircle(point.x, point.y, radius, p)
         p.shader = null
-        val craterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = withAlpha(0xFF647184.toInt(), (75 * dim).toInt()) }
-        canvas.drawCircle(point.x - radius * 0.28f, point.y + radius * 0.14f, radius * 0.18f, craterPaint)
-        canvas.drawCircle(point.x + radius * 0.24f, point.y - radius * 0.30f, radius * 0.12f, craterPaint)
-        canvas.drawCircle(point.x + radius * 0.32f, point.y + radius * 0.34f, radius * 0.10f, craterPaint)
-        p.color = Color.WHITE
-        p.alpha = (255 * dim).toInt()
-        p.style = Paint.Style.STROKE
-        p.strokeWidth = 0.7f * dp
+
+        val save = canvas.save()
+        canvas.clipPath(lit)
+        p.shader = RadialGradient(point.x - radius * 0.32f, point.y - radius * 0.35f, radius * 1.7f,
+            intArrayOf(0xFFFFFFFF.toInt(), 0xFFE1E5E9.toInt(), 0xFF9AA4B1.toInt()), null, Shader.TileMode.CLAMP)
         canvas.drawCircle(point.x, point.y, radius, p)
-        p.style = Paint.Style.FILL
-        p.alpha = 255
+        p.shader = null
+        val maria = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = withAlpha(0xFF747E8B.toInt(), (70 * dim).toInt()) }
+        canvas.drawOval(point.x - radius * 0.68f, point.y - radius * 0.12f, point.x - radius * 0.05f, point.y + radius * 0.34f, maria)
+        canvas.drawOval(point.x + radius * 0.08f, point.y - radius * 0.7f, point.x + radius * 0.42f, point.y - radius * 0.22f, maria)
+        val craterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = withAlpha(0xFF687483.toInt(), (100 * dim).toInt()) }
+        val craters = floatArrayOf(-0.28f, 0.14f, 0.18f, 0.24f, -0.30f, 0.12f, 0.32f, 0.34f, 0.10f, -0.12f, 0.55f, 0.09f, 0.47f, -0.50f, 0.08f, -0.58f, -0.42f, 0.07f, -0.62f, 0.42f, 0.06f)
+        for (i in craters.indices step 3) {
+            val x = point.x + craters[i] * radius; val y = point.y + craters[i + 1] * radius; val r = craters[i + 2] * radius
+            canvas.drawCircle(x, y, r, craterPaint)
+            craterPaint.color = withAlpha(0xFFF4F5F6.toInt(), (55 * dim).toInt())
+            canvas.drawCircle(x - r * 0.18f, y - r * 0.18f, r * 0.74f, craterPaint)
+            craterPaint.color = withAlpha(0xFF687483.toInt(), (100 * dim).toInt())
+        }
+        canvas.restoreToCount(save)
+
+        p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 0.8f * dp
+        p.color = withAlpha(0xFFE6EDF7.toInt(), (190 * dim).toInt())
+        canvas.drawCircle(point.x, point.y, radius, p)
+        p.style = Paint.Style.FILL; p.alpha = 255
     }
 
     private fun drawPlanet(canvas: Canvas, name: String, point: Projected, radius: Float, dim: Float, zoom: Float) {
@@ -577,19 +633,6 @@ class SkyView(ctx: Context) : View(ctx) {
         p.style = Paint.Style.FILL
     }
 
-    private fun drawCenterReticle(canvas: Canvas) {
-        p.shader = null
-        p.style = Paint.Style.STROKE
-        p.strokeWidth = 1f * dp
-        p.color = 0x4489CFFF
-        canvas.drawCircle(width / 2f, height / 2f, 10f * dp, p)
-        canvas.drawLine(width / 2f - 15f * dp, height / 2f, width / 2f - 7f * dp, height / 2f, p)
-        canvas.drawLine(width / 2f + 7f * dp, height / 2f, width / 2f + 15f * dp, height / 2f, p)
-        canvas.drawLine(width / 2f, height / 2f - 15f * dp, width / 2f, height / 2f - 7f * dp, p)
-        canvas.drawLine(width / 2f, height / 2f + 7f * dp, width / 2f, height / 2f + 15f * dp, p)
-        p.style = Paint.Style.FILL
-    }
-
     private fun drawStatus(canvas: Canvas) {
         textPaint.shader = null
         textPaint.style = Paint.Style.FILL
@@ -610,6 +653,19 @@ class SkyView(ctx: Context) : View(ctx) {
     private fun formatHours(degrees: Double): String {
         val hours = degrees / 15.0
         return L.t("%dh %02dm", "%dч %02dм").format(hours.toInt(), ((hours - hours.toInt()) * 60).toInt())
+    }
+
+    private fun localizeBodyValue(value: String): String {
+        if (!L.ru) return value
+        return value.replace("Earth days", "земных суток")
+            .replace("Earth years", "земных лет")
+            .replace("million years", "млн лет")
+            .replace("around the Milky Way", "вокруг Млечного Пути")
+            .replace("rotation varies by latitude", "скорость зависит от широты")
+            .replace("Synchronous rotation", "синхронное вращение")
+            .replace("days", "суток")
+            .replace("hours", "ч")
+            .replace(" (retrograde)", " (ретроградное вращение)")
     }
 
     private fun riseSet(b: Body, jd: Double): String {
@@ -644,8 +700,18 @@ class SkyView(ctx: Context) : View(ctx) {
             else "\n\n${L.t("ABOUT THIS STAR", "О ЗВЕЗДЕ")}\n${L.t("Approximate colour class", "Примерный спектральный класс по цвету")}: $colorClass\n${L.t("Color index B−V", "Индекс цвета B−V")}: %.2f\n".format(body.bv) +
                 L.t("The catalog has no reliable radius, mass or distance for this star yet.", "В каталоге пока нет надёжных данных о радиусе, массе и расстоянии этой звезды.")
         } else ""
+        val physical = Catalog.bodyFacts[body.name]?.let { facts ->
+            "\n\n${L.t("PHYSICAL DATA", "ФИЗИЧЕСКИЕ ДАННЫЕ")}" +
+                "\n${L.t("Mean radius", "Средний радиус")}: ${facts.radiusKm} km" +
+                "\n${L.t("Mass", "Масса")}: ${facts.massKg} kg" +
+                "\n${L.t("Surface gravity", "Ускорение свободного падения")}: ${facts.gravity}" +
+                "\n${L.t("Rotation / day", "Вращение / сутки")}: ${localizeBodyValue(facts.day)}" +
+                "\n${L.t("Orbit", "Орбитальный период")}: ${localizeBodyValue(facts.year)}" +
+                "\n\n${L.t("DID YOU KNOW?", "ИНТЕРЕСНЫЙ ФАКТ")}: ${L.t(facts.factEn, facts.factRu)}" +
+                "\n\n${L.t("Reference data: NASA / JPL.", "Справочные данные: NASA / JPL.")}"
+        } ?: ""
         return "${L.name(body.name)} · ${L.type(body.type)}\n$mag" + L.t("RA ", "Пр. восх. ") + formatHours(body.ra) + "   " + L.t("Dec ", "Скл. ") + "%.2f°\n".format(body.dec) +
-            L.t("Altitude ", "Высота ") + "%.1f°   ".format(alt) + L.t("Azimuth ", "Азимут ") + "%.1f°".format(az) + dist + star + "\n\n" + riseSet(body, jd) +
+            L.t("Altitude ", "Высота ") + "%.1f°   ".format(alt) + L.t("Azimuth ", "Азимут ") + "%.1f°".format(az) + dist + star + physical + "\n\n" + riseSet(body, jd) +
             (if (alt < 0) "\n" + L.t("Below the horizon", "Под горизонтом") else "")
     }
 
@@ -750,7 +816,7 @@ class SkyView(ctx: Context) : View(ctx) {
                 o
             }
         }
-        p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = 1f * dp; p.color = withAlpha(0xFF7FB6E8.toInt(), (120 * (1 - day * 0.9f)).toInt())
+        p.shader = null; p.style = Paint.Style.STROKE; p.strokeCap = Paint.Cap.ROUND
         val m = M; val u = Ueq; val w = width.toFloat(); val h = height.toFloat(); val cx = w / 2; val cy = h / 2; val k2 = 2.0 * f
         for (ln in lineV) {
             var px = 0f; var py = 0f; var pUp = 0.0; var pOk = false; var i = 0
@@ -761,16 +827,24 @@ class SkyView(ctx: Context) : View(ctx) {
                 val k = k2 / den
                 val x = (cx + k * (m[0] * vx + m[1] * vy + m[2] * vz)).toFloat(); val y = (cy - k * (m[3] * vx + m[4] * vy + m[5] * vz)).toFloat()
                 val up = u[0] * vx + u[1] * vy + u[2] * vz
-                if (pOk && !(showGround && (pUp < 0 || up < 0)) && !(px < 0 && x < 0 || px > w && x > w || py < 0 && y < 0 || py > h && y > h)) c.drawLine(px, py, x, y, p)
+                if (pOk && !(showGround && (pUp < 0 || up < 0)) && !(px < 0 && x < 0 || px > w && x > w || py < 0 && y < 0 || py > h && y > h)) {
+                    p.strokeWidth = 3.2f * dp; p.color = withAlpha(0xFF67B7F3.toInt(), (24 * (1 - day * 0.75f)).toInt())
+                    c.drawLine(px, py, x, y, p)
+                    p.strokeWidth = 1.15f * dp; p.color = withAlpha(0xFFA8D5FF.toInt(), (155 * (1 - day * 0.85f)).toInt())
+                    c.drawLine(px, py, x, y, p)
+                }
                 px = x; py = y; pUp = up; pOk = true
             }
         }
         p.style = Paint.Style.FILL
         if (showConNames && day < 0.6f) {
-            textPaint.textSize = 10f * dp; textPaint.color = withAlpha(0xFF9CC8F0.toInt(), 150); textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = 10.5f * dp; textPaint.color = withAlpha(0xFFA9C9EA.toInt(), 175); textPaint.textAlign = Paint.Align.CENTER
             for (k in Catalog.cons) { val (r, d) = Astro.precess(k.ra, k.dec, jd); val q = project(r, d) ?: continue
                 if (showGround && q.alt < 0) continue
+                if (q.x < -80 || q.x > w + 80 || q.y < -40 || q.y > h + 40) continue
+                textPaint.setShadowLayer(3f * dp, 0f, 1f * dp, 0xAA020817.toInt())
                 c.drawText(L.t(k.en, k.ru).uppercase(), q.x, q.y, textPaint) }
+            textPaint.clearShadowLayer()
             textPaint.textAlign = Paint.Align.LEFT
         }
     }
@@ -806,7 +880,7 @@ class SkyView(ctx: Context) : View(ctx) {
             if (prevOk) tracePath.lineTo(point.x, point.y) else tracePath.moveTo(point.x, point.y)
             // Hourly markers; label only every six hours. Leave the final sample
             // unlabeled and undotted so it cannot duplicate the starting timestamp.
-            if (k < trace.lastIndex && k % 12 == 0) {
+            if (k > 0 && k < trace.lastIndex && k % 12 == 0) {
                 val a = 230
                 p.style = Paint.Style.FILL; p.color = withAlpha(0xFF9BE7FF.toInt(), a)
                 c.drawCircle(point.x, point.y, 3.2f * dp, p)
@@ -817,24 +891,29 @@ class SkyView(ctx: Context) : View(ctx) {
         }
         p.style = Paint.Style.STROKE; p.strokeWidth = 1.1f * dp; p.color = withAlpha(0xFF9BE7FF.toInt(), 155)
         c.drawPath(tracePath, p); p.style = Paint.Style.FILL
-    }
 
-    /** Edge arrow pointing to the selected object when it is outside the field of view. */
-    private fun drawArrow(c: Canvas, jd: Double, bodies: List<Body>) {
-        val b = bodies.firstOrNull { it.name == selected } ?: Astro.starByName(jd, selected ?: "") ?: return
-        val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, jd)
-        val a = Math.toRadians(az - decl); val e = Math.toRadians(alt)
-        val wx = cos(e) * sin(a); val wy = cos(e) * cos(a); val wz = sin(e); val r = frameRot
-        val dx = r[0] * wx + r[3] * wy + r[6] * wz; val dy = r[1] * wx + r[4] * wy + r[7] * wz; val dz = r[2] * wx + r[5] * wy + r[8] * wz
-        val sep = Math.toDegrees(acos((-dz).coerceIn(-1.0, 1.0)))
-        if (sep < fovDeg * 0.45) return
-        val ang = atan2(-dy, dx).toFloat(); val rad = min(width, height) / 2f - 70f * dp
-        val cx = width / 2f + cos(ang) * rad; val cy = height / 2f + sin(ang) * rad
-        c.save(); c.rotate(Math.toDegrees(ang.toDouble()).toFloat(), cx, cy)
-        arrowPath.rewind(); arrowPath.moveTo(cx + 16 * dp, cy); arrowPath.lineTo(cx - 10 * dp, cy - 12 * dp); arrowPath.lineTo(cx - 10 * dp, cy + 12 * dp); arrowPath.close()
-        p.style = Paint.Style.FILL; p.shader = null; p.color = 0xFF58B9F5.toInt(); c.drawPath(arrowPath, p); c.restore()
-        textPaint.textSize = 12f * dp; textPaint.color = 0xFFEAF6FF.toInt(); textPaint.textAlign = Paint.Align.CENTER
-        c.drawText("${L.name(b.name)} · ${sep.toInt()}°", cx - cos(ang) * 30 * dp, cy - sin(ang) * 30 * dp, textPaint); textPaint.textAlign = Paint.Align.LEFT
+        // The daily trace is cached for smooth rendering, but the five-minute forecast
+        // is anchored to the actual current clock rather than the cache's old start time.
+        val second = now() / 1000L
+        if (forecastName != name || forecastSecond != second) {
+            forecastName = name; forecastSecond = second
+            forecastJd = jd + 5.0 / 1440.0
+            forecastBody = Astro.bodyAt(forecastJd, name)
+        }
+        val future = forecastBody
+        if (future != null) {
+            val (alt, az) = Astro.altAz(future.ra, future.dec, lat, lon, forecastJd)
+            val point = projectAzAlt(az, alt, f)
+            if (point != null) {
+                p.style = Paint.Style.FILL; p.color = 0x66FFD36B
+                c.drawCircle(point.x, point.y, 10f * dp, p)
+                p.color = 0xFFFFD36B.toInt(); c.drawCircle(point.x, point.y, 5f * dp, p)
+                textPaint.textSize = 10f * dp; textPaint.textAlign = Paint.Align.LEFT
+                textPaint.color = 0xFFFFE7A8.toInt(); textPaint.setShadowLayer(3f * dp, 0f, 0f, 0xFFFFB13B.toInt())
+                c.drawText(L.t("+5 min", "+5 мин"), point.x + 8 * dp, point.y - 7 * dp, textPaint)
+                textPaint.clearShadowLayer()
+            }
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -843,11 +922,23 @@ class SkyView(ctx: Context) : View(ctx) {
             MotionEvent.ACTION_DOWN -> {
                 downX = event.x
                 downY = event.y
+                lastX = event.x
+                lastY = event.y
                 gestureScaling = false
+                gesturePanning = false
             }
             MotionEvent.ACTION_POINTER_DOWN -> gestureScaling = true
+            MotionEvent.ACTION_MOVE -> {
+                if (manualMode && !gestureScaling && event.pointerCount == 1) {
+                    val moved = hypot((event.x - downX).toDouble(), (event.y - downY).toDouble())
+                    if (moved > 6.0 * dp) gesturePanning = true
+                    if (gesturePanning) panManual(event.x - lastX, event.y - lastY)
+                }
+                lastX = event.x
+                lastY = event.y
+            }
             MotionEvent.ACTION_UP -> {
-                if (!gestureScaling && !scaleDetector.isInProgress && hypot((event.x - downX).toDouble(), (event.y - downY).toDouble()) < 20.0 * dp) {
+                if (!gesturePanning && !gestureScaling && !scaleDetector.isInProgress && hypot((event.x - downX).toDouble(), (event.y - downY).toDouble()) < 20.0 * dp) {
                     var closest: Hit? = null; var closestDistance = Double.POSITIVE_INFINITY
                     for (i in 0 until hitCount) {
                         val candidate = hits[i]
@@ -864,8 +955,9 @@ class SkyView(ctx: Context) : View(ctx) {
                     invalidate()
                 }
                 gestureScaling = false
+                gesturePanning = false
             }
-            MotionEvent.ACTION_CANCEL -> gestureScaling = false
+            MotionEvent.ACTION_CANCEL -> { gestureScaling = false; gesturePanning = false }
         }
         return true
     }

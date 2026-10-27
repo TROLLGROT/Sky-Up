@@ -23,6 +23,22 @@ object Catalog {
     // Rounded reference values for the brightest familiar stars. Unknown figures are
     // intentionally left blank rather than guessed from colour alone.
     data class StarFacts(val kind: String, val radius: String, val mass: String, val distanceLy: String, val note: String)
+    data class BodyFacts(
+        val radiusKm: String, val massKg: String, val gravity: String,
+        val day: String, val year: String, val factEn: String, val factRu: String
+    )
+    val bodyFacts = mapOf(
+        "Sun" to BodyFacts("695,700", "1.9885 × 10³⁰", "274 m/s²", "25–35 days (rotation varies by latitude)", "≈ 230 million years around the Milky Way", "The Sun is a G-type main-sequence star; fusion in its core powers its light.", "Солнце — звезда главной последовательности типа G; свет рождается при термоядерном синтезе в ядре."),
+        "Mercury" to BodyFacts("2,439.7", "3.301 × 10²³", "3.70 m/s²", "58.6 Earth days", "88 Earth days", "A day-night cycle on Mercury lasts two of its years.", "Цикл от восхода до следующего восхода на Меркурии длится два его года."),
+        "Venus" to BodyFacts("6,051.8", "4.867 × 10²⁴", "8.87 m/s²", "243 Earth days (retrograde)", "225 Earth days", "Its dense carbon-dioxide atmosphere creates surface pressure about 92 times Earth's.", "Плотная атмосфера из углекислого газа создаёт у поверхности давление примерно в 92 раза выше земного."),
+        "Earth" to BodyFacts("6,371", "5.972 × 10²⁴", "9.81 m/s²", "23 h 56 min", "365.256 days", "The only world known to host life; liquid water covers most of its surface.", "Единственный известный мир с жизнью; большая часть поверхности покрыта жидкой водой."),
+        "Moon" to BodyFacts("1,737.4", "7.342 × 10²²", "1.62 m/s²", "Synchronous rotation", "27.32 days around Earth", "The Moon keeps nearly the same hemisphere facing Earth and slowly recedes from us.", "Луна почти всегда обращена к Земле одной стороной и медленно удаляется от нас."),
+        "Mars" to BodyFacts("3,389.5", "6.417 × 10²³", "3.71 m/s²", "24 h 37 min", "687 Earth days", "Olympus Mons is the largest known volcano in the Solar System.", "На Марсе находится Олимп — крупнейший известный вулкан Солнечной системы."),
+        "Jupiter" to BodyFacts("69,911", "1.898 × 10²⁷", "24.79 m/s²", "9 h 56 min", "11.86 Earth years", "Europa, one of Jupiter's moons, is believed to hide a deep global saltwater ocean beneath its ice.", "Подо льдом Европы, спутника Юпитера, вероятно, скрывается глубокий глобальный океан солёной воды."),
+        "Saturn" to BodyFacts("58,232", "5.683 × 10²⁶", "10.44 m/s²", "10 h 33 min", "29.45 Earth years", "Enceladus has a subsurface ocean; icy jets from its south pole let spacecraft sample material from it.", "Под Энцеладом есть океан; ледяные выбросы у южного полюса позволяют исследовать его вещество."),
+        "Uranus" to BodyFacts("25,362", "8.681 × 10²⁵", "8.69 m/s²", "17 h 14 min (retrograde)", "84 Earth years", "Uranus rotates almost on its side, producing extreme seasons.", "Уран вращается почти лёжа на боку, поэтому его сезоны особенно необычны."),
+        "Neptune" to BodyFacts("24,622", "1.024 × 10²⁶", "11.15 m/s²", "16 h 6 min", "164.8 Earth years", "Neptune's atmosphere hosts the fastest winds measured on any planet.", "В атмосфере Нептуна дуют самые быстрые ветры среди планет."),
+    )
     val starFacts = mapOf(
         "Sirius" to StarFacts("A1V · белая звезда главной последовательности", "1.71 R☉", "2.06 M☉", "8.6 св. лет", "Самая яркая звезда ночного неба. Её спутник Сириус B — белый карлик с массой около 0.98 M☉ и диаметром меньше земного."),
         "Canopus" to StarFacts("A9 II · яркий гигант", "71 R☉", "8 M☉", "310 св. лет", "Вторая по яркости звезда ночного неба."),

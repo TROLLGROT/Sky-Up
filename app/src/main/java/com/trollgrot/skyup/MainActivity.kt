@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.drawable.GradientDrawable
 import android.hardware.GeomagneticField
 import android.hardware.Sensor
@@ -22,6 +24,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -30,12 +33,21 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.acos
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import org.json.JSONObject
 
 class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var sky: SkyView
     private lateinit var info: TextView
     private lateinit var detailSheet: FrameLayout
     private lateinit var starArt: View
+    private lateinit var nasaArt: ImageView
+    private lateinit var nasaCaption: TextView
+    private var nasaRequestId = 0
+    private val nasaImageCache = LinkedHashMap<String, Bitmap>()
+    private val nasaImageCredits = HashMap<String, String>()
     private lateinit var sm: SensorManager
     private lateinit var root: FrameLayout
     private lateinit var settingsOverlay: FrameLayout
@@ -44,6 +56,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var calibrationProgress: ProgressBar
     private lateinit var calibrationStatus: TextView
     private lateinit var calibrationAction: Button
+    private lateinit var controlModeButton: Button
 
     private val q = FloatArray(4)
     private val calibrationPreviousQ = FloatArray(4)
@@ -106,6 +119,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         sky.onSelect = { message ->
             detailSheet.visibility = if (message == null) View.GONE else View.VISIBLE
             if (message != null) { info.text = message; starArt.tag = message; starArt.invalidate() }
+            loadNasaImage(message)
         }
         detailSheet = makeDetailSheet()
         detailSheet.visibility = View.GONE
@@ -118,6 +132,19 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         root.addView(makeZoomControls(), FrameLayout.LayoutParams(dp(48), dp(112), Gravity.END or Gravity.CENTER_VERTICAL).apply {
             marginEnd = dp(12)
         })
+        controlModeButton = Button(this).apply {
+            text = modeButtonText(false)
+            textSize = 12f
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            background = roundedGradient(0xD80C2B50.toInt(), 0xE91A5791.toInt(), 22)
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setOnClickListener { sky.toggleControlMode() }
+        }
+        root.addView(controlModeButton, FrameLayout.LayoutParams(-2, dp(48), Gravity.START or Gravity.BOTTOM).apply {
+            marginStart = dp(12); bottomMargin = dp(18)
+        })
+        sky.onControlModeChange = { manual -> controlModeButton.text = modeButtonText(manual) }
         settingsOverlay = makeSettingsOverlay()
         settingsOverlay.visibility = View.GONE
         root.addView(settingsOverlay, FrameLayout.LayoutParams(-1, -1))
@@ -231,8 +258,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     }
 
     private fun recalibrateCompass() {
-        // Android owns hardware compass calibration. The app resets its orientation filter,
-        // then guides the user through a figure-eight and checks that the phone was actually moved.
+        // Android owns hardware compass calibration; this guides the user through a
+        // figure-eight and confirms that the phone was actually moved.
         calibrationActive = true
         calibrationHasPrevious = false
         calibrationStartedAt = android.os.SystemClock.elapsedRealtime()
@@ -436,6 +463,66 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             .setItems(names.map { L.name(it) }.toTypedArray()) { _, i -> sky.select(names[i]) }.show()
     }
 
+    /** Load one NASA Library preview off the UI thread; the local sphere stays as the offline fallback. */
+    private fun loadNasaImage(message: String?) {
+        val requestId = ++nasaRequestId
+        nasaArt.visibility = View.GONE
+        nasaCaption.visibility = View.GONE
+        if (message == null) return
+        val displayed = message.substringBefore('\n').substringBefore('·').trim()
+        val names = listOf("Sun", "Moon", "Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune") + Catalog.ru.keys
+        val objectName = names.firstOrNull { L.name(it) == displayed } ?: displayed
+        nasaImageCache[objectName]?.let { bitmap ->
+            nasaArt.setImageBitmap(bitmap)
+            nasaArt.visibility = View.VISIBLE
+            nasaCaption.text = "${nasaImageCredits[objectName] ?: "NASA"} · ${L.t("archive image", "снимок из архива")}: $objectName"
+            nasaCaption.visibility = View.VISIBLE
+            return
+        }
+        Thread({
+            var bitmap: Bitmap? = null
+            var title = objectName
+            var credit = "NASA"
+            try {
+                val encoded = URLEncoder.encode(objectName, "UTF-8")
+                val search = URL("https://images-api.nasa.gov/search?q=$encoded&media_type=image&page_size=1").openConnection() as HttpURLConnection
+                search.connectTimeout = 4500; search.readTimeout = 6500
+                val result = try { search.inputStream.bufferedReader().use { JSONObject(it.readText()) } } finally { search.disconnect() }
+                val items = result.optJSONObject("collection")?.optJSONArray("items")
+                if (items != null && items.length() > 0) {
+                    val item = items.optJSONObject(0)
+                    val metadata = item?.optJSONArray("data")?.optJSONObject(0)
+                    title = metadata?.optString("title", objectName) ?: objectName
+                    credit = metadata?.optString("center", "NASA") ?: "NASA"
+                    val links = item?.optJSONArray("links")
+                    var imageUrl: String? = null
+                    if (links != null) for (i in 0 until links.length()) {
+                        val link = links.optJSONObject(i) ?: continue
+                        if (link.optString("rel") == "preview") { imageUrl = link.optString("href"); break }
+                    }
+                    if (!imageUrl.isNullOrBlank()) {
+                        val image = URL(imageUrl).openConnection() as HttpURLConnection
+                        image.connectTimeout = 4500; image.readTimeout = 6500
+                        bitmap = try { image.inputStream.use { BitmapFactory.decodeStream(it) } } finally { image.disconnect() }
+                    }
+                }
+            } catch (_: Exception) { /* Keep the generated, offline model visible. */ }
+            val loaded = bitmap
+            val loadedCredit = credit
+            if (loaded != null) runOnUiThread {
+                if (requestId != nasaRequestId || isFinishing) return@runOnUiThread
+                if (nasaImageCache.size >= 8) nasaImageCache.remove(nasaImageCache.keys.first())
+                nasaImageCache[objectName] = loaded
+                nasaImageCredits[objectName] = loadedCredit
+                nasaArt.setImageBitmap(loaded)
+                nasaArt.contentDescription = title
+                nasaArt.visibility = View.VISIBLE
+                nasaCaption.text = "$loadedCredit · $title"
+                nasaCaption.visibility = View.VISIBLE
+            }
+        }, "nasa-image-preview").apply { isDaemon = true; start() }
+    }
+
     private fun makeTopBar(): View {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -454,7 +541,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
         val subtitle = TextView(this).apply {
-            text = L.t("LIVE SKY MAP", "КАРТА НЕБА")
+            text = L.t("ONLY STARS ABOVE", "ВЫШЕ — ТОЛЬКО ЗВЁЗДЫ")
             setTextColor(paleBlue)
             textSize = 9f
             letterSpacing = 0.18f
@@ -505,6 +592,9 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         return controls
     }
 
+    private fun modeButtonText(manual: Boolean): String = if (manual)
+        L.t("◎  GYROSCOPE", "◎  ГИРОСКОП") else L.t("✋  MANUAL", "✋  ВРУЧНУЮ")
+
     private fun makeDetailSheet(): FrameLayout {
         val sheet = FrameLayout(this).apply {
             setBackgroundColor(0xF20A1A31.toInt())
@@ -527,7 +617,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> { startY = event.rawY; true }
                 android.view.MotionEvent.ACTION_UP -> {
-                    if (event.rawY - startY > dp(48)) { sky.clearSelection(); detailSheet.visibility = View.GONE }
+                    if (event.rawY - startY > dp(48)) { sky.dismissDetails(); detailSheet.visibility = View.GONE }
                     true
                 }
                 else -> true
@@ -541,7 +631,24 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 val cx = width / 2f; val cy = height / 2f
                 canvas.drawColor(0xFF091526.toInt())
                 val detail = (tag as? String).orEmpty()
+                val objectLabel = detail.substringBefore('\n').substringBefore('·').trim()
+                val bodyKey = (listOf("Sun", "Moon", "Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune")
+                    .firstOrNull { L.name(it) == objectLabel } ?: objectLabel)
+                val isSolarBody = Catalog.bodyFacts.containsKey(bodyKey)
+                val isMoon = bodyKey == "Moon"
+                val isSun = bodyKey == "Sun"
+                val isSaturn = bodyKey == "Saturn"
+                val isJupiter = bodyKey == "Jupiter"
+                val isMars = bodyKey == "Mars"
                 val core = when {
+                    isMoon -> 0xFFE1E6EC.toInt()
+                    isMars -> 0xFFFF956C.toInt()
+                    isJupiter -> 0xFFFFD4A0.toInt()
+                    isSaturn -> 0xFFFFE6AD.toInt()
+                    bodyKey == "Uranus" -> 0xFF9EEAF0.toInt()
+                    bodyKey == "Neptune" -> 0xFF668FE8.toInt()
+                    bodyKey == "Venus" -> 0xFFFFE6B0.toInt()
+                    isSun -> 0xFFFFD451.toInt()
                     detail.contains("M1") || detail.contains("M2") -> 0xFFFF7256.toInt()
                     detail.contains("K0") || detail.contains("K1") || detail.contains("K5") -> 0xFFFFB45E.toInt()
                     detail.contains("B0") || detail.contains("B1") || detail.contains("B6") || detail.contains("B7") || detail.contains("B8") -> 0xFF8FCBFF.toInt()
@@ -557,11 +664,19 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 }
                 val isRedGiant = detail.contains("M1") || detail.contains("M2")
                 val isGiant = detail.contains(" III") || detail.contains(" Ia") || detail.contains(" Ib")
-                val radius = dp(if (isRedGiant) 68 else if (isGiant) 61 else 54).toFloat()
+                val radius = dp(if (isSolarBody) 62 else if (isRedGiant) 68 else if (isGiant) 61 else 54).toFloat()
                 artPaint.shader = android.graphics.RadialGradient(cx, cy, radius * 1.55f,
                     intArrayOf((0x44 shl 24) or (halo and 0x00FFFFFF), (0x1C shl 24) or (halo and 0x00FFFFFF), 0x00000000), null, android.graphics.Shader.TileMode.CLAMP)
                 canvas.drawCircle(cx, cy, radius * 1.55f, artPaint)
                 artPaint.shader = null
+                if (isSaturn) {
+                    canvas.save(); canvas.rotate(-17f, cx, cy)
+                    artPaint.style = android.graphics.Paint.Style.STROKE; artPaint.strokeWidth = dp(4).toFloat(); artPaint.color = 0xB8D6B77E.toInt()
+                    canvas.drawOval(cx - radius * 2.05f, cy - radius * 0.54f, cx + radius * 2.05f, cy + radius * 0.54f, artPaint)
+                    artPaint.strokeWidth = dp(1.5f).toFloat(); artPaint.color = 0xDDF3DEB1.toInt()
+                    canvas.drawOval(cx - radius * 1.72f, cy - radius * 0.43f, cx + radius * 1.72f, cy + radius * 0.43f, artPaint)
+                    artPaint.style = android.graphics.Paint.Style.FILL; canvas.restore()
+                }
                 val sphere = android.graphics.Path().apply { addCircle(cx, cy, radius, android.graphics.Path.Direction.CW) }
                 canvas.save()
                 canvas.clipPath(sphere)
@@ -570,12 +685,34 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 canvas.drawCircle(cx, cy, radius, artPaint)
                 artPaint.shader = null
 
-                // Low-frequency granulation gives the stellar disc texture without a
-                // downloaded bitmap, and this view redraws only when a star is selected.
+                if (isJupiter || isSaturn || bodyKey == "Neptune" || bodyKey == "Uranus") {
+                    val bandPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        style = android.graphics.Paint.Style.STROKE; strokeWidth = dp(if (isJupiter) 5 else 3).toFloat()
+                    }
+                    for (i in -3..3) {
+                        bandPaint.color = if (i % 2 == 0) (if (isJupiter) 0x66A45E43 else 0x668B9FAF) else 0x44FFF2D8
+                        val y = cy + i * radius * 0.23f
+                        canvas.drawLine(cx - radius, y, cx + radius, y + radius * 0.08f, bandPaint)
+                    }
+                    if (isJupiter) {
+                        bandPaint.style = android.graphics.Paint.Style.FILL; bandPaint.color = 0x99CE7651.toInt()
+                        canvas.drawOval(cx + radius * 0.12f, cy + radius * 0.14f, cx + radius * 0.62f, cy + radius * 0.42f, bandPaint)
+                    }
+                } else if (isMoon || isMars) {
+                    val terrainPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = 0x667B584D }
+                    val terrain = if (isMoon) floatArrayOf(-0.35f, -0.08f, 0.15f, 0.35f, 0.3f, 0.09f, -0.45f, 0.42f, 0.07f, 0.18f, -0.48f, 0.06f) else floatArrayOf(-0.28f, 0.16f, 0.18f, 0.30f, -0.28f, 0.12f, 0.42f, 0.25f, 0.09f)
+                    for (i in terrain.indices step 3) {
+                        val x = cx + terrain[i] * radius; val y = cy + terrain[i + 1] * radius; val r = terrain[i + 2] * radius
+                        canvas.drawCircle(x, y, r, terrainPaint)
+                    }
+                }
+
+                // Stars have no resolved NASA surface photographs (except the Sun), so
+                // use stable spectral-class granulation as an explicitly illustrative model.
                 val seed = detail.substringBefore('·').hashCode().toLong()
                 val random = java.util.Random(seed)
                 val surfacePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-                repeat(150) {
+                if (!isSolarBody || isSun) repeat(if (isRedGiant) 180 else 135) {
                     val angle = random.nextDouble() * Math.PI * 2
                     val distance = kotlin.math.sqrt(random.nextDouble()) * radius * 0.92
                     val x = cx + kotlin.math.cos(angle).toFloat() * distance.toFloat()
@@ -603,11 +740,31 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                     canvas.drawCircle(cx + radius * 1.02f, cy + radius * 0.48f, dp(5).toFloat(), artPaint)
                 }
                 artPaint.color = 0xFFB6D7F2.toInt(); artPaint.textSize = dp(11).toFloat(); artPaint.textAlign = android.graphics.Paint.Align.CENTER
-                canvas.drawText(L.t("STELLAR SURFACE MODEL · NOT TO SCALE", "МОДЕЛЬ ЗВЁЗДНОЙ ПОВЕРХНОСТИ · НЕ В МАСШТАБЕ"), cx, height - dp(12).toFloat(), artPaint)
+                val caption = if (isSolarBody) L.t("ILLUSTRATIVE BODY MODEL · NOT TO SCALE", "МОДЕЛЬ НЕБЕСНОГО ТЕЛА · НЕ В МАСШТАБЕ")
+                    else L.t("ILLUSTRATIVE STELLAR MODEL · NOT TO SCALE", "ХУДОЖЕСТВЕННАЯ МОДЕЛЬ ЗВЕЗДЫ · НЕ В МАСШТАБЕ")
+                canvas.drawText(caption, cx, height - dp(12).toFloat(), artPaint)
             }
         }
         starArt.background = roundedGradient(0xFF091526.toInt(), 0xFF122744.toInt(), 20)
-        content.addView(starArt, LinearLayout.LayoutParams(-1, dp(190)))
+        val visual = FrameLayout(this).apply {
+            background = roundedGradient(0xFF091526.toInt(), 0xFF122744.toInt(), 20)
+            clipToOutline = true
+        }
+        visual.addView(starArt, FrameLayout.LayoutParams(-1, -1))
+        nasaArt = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+        }
+        visual.addView(nasaArt, FrameLayout.LayoutParams(-1, -1))
+        nasaCaption = TextView(this).apply {
+            textSize = 9f
+            setTextColor(0xFFEAF4FF.toInt())
+            setPadding(dp(8), dp(3), dp(8), dp(3))
+            background = android.graphics.drawable.ColorDrawable(0x99030B16.toInt())
+            visibility = View.GONE
+        }
+        visual.addView(nasaCaption, FrameLayout.LayoutParams(-1, dp(24), Gravity.BOTTOM))
+        content.addView(visual, LinearLayout.LayoutParams(-1, dp(190)))
         content.addView(ScrollView(this).apply { addView(info) }, LinearLayout.LayoutParams(-1, 0, 1f))
         sheet.addView(content, FrameLayout.LayoutParams(-1, -1))
         return sheet
