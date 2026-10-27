@@ -15,7 +15,8 @@ import kotlin.math.*
 import java.util.Random
 
 class SkyView(ctx: Context) : View(ctx) {
-    var rot = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
+    @Volatile var rot = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
+    private var frameRot = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
     var lat = 0.0
     var lon = 0.0
     var decl = 0.0
@@ -135,7 +136,7 @@ class SkyView(ctx: Context) : View(ctx) {
         val wx = cos(e) * sin(a)
         val wy = cos(e) * cos(a)
         val wz = sin(e)
-        val r = rot
+        val r = frameRot
         val dx = r[0] * wx + r[3] * wy + r[6] * wz
         val dy = r[1] * wx + r[4] * wy + r[7] * wz
         val dz = r[2] * wx + r[5] * wy + r[8] * wz
@@ -149,6 +150,9 @@ class SkyView(ctx: Context) : View(ctx) {
         super.onDraw(canvas)
         canvas.drawColor(0xFF020817.toInt())
         if (width == 0 || height == 0) return
+        // Read the atomically published sensor matrix once so every layer in a frame
+        // uses the same orientation rather than mixing values from two sensor events.
+        frameRot = rot
         ensureAzimuthTrigCache()
 
         p.style = Paint.Style.FILL
@@ -182,7 +186,6 @@ class SkyView(ctx: Context) : View(ctx) {
         if (day > 0f) canvas.drawColor(withAlpha(0xFF3A78B8.toInt(), (235 * day).toInt()))
         val haze = lerpC(lerpC(0xFF1B3A6B.toInt(), 0xFF9CC8F0.toInt(), day), 0xFFFF8A3C.toInt(), twi * 0.8f)
         if (day > 0f) for (i in 0 until 8) fillBand(canvas, focal, i * 3.5 + 3.5, i * 3.5, withAlpha(haze, (130 * (1 - i / 8f) * (1 - i / 8f)).toInt()))
-        if (Catalog.stars.isEmpty()) drawBackgroundStars(canvas, ::project)
         if (showGrid) drawGrid(canvas, focal)
         if (showConstellations) drawConstellations(canvas, julianDay, day, focal, ::project)
         drawHorizonAndEcliptic(canvas, focal, julianDay, ::project)
@@ -190,7 +193,9 @@ class SkyView(ctx: Context) : View(ctx) {
 
         hitCount = 0
         val zoom = (ln(MAX_FOV / fovDeg) / ln(12.0)).coerceIn(0.0, 1.0).toFloat()
-        drawStars(canvas, julianDay, focal, zoom, starFade)
+        val catalogStars = Astro.stars(julianDay)
+        if (catalogStars.isEmpty()) drawBackgroundStars(canvas, ::project)
+        else drawStars(canvas, catalogStars, focal, zoom, starFade)
         for (body in bodies) {
             if (body.type == "Star" && body.mag > starLimit) continue
             val point = project(body.ra, body.dec) ?: continue
@@ -355,15 +360,15 @@ class SkyView(ctx: Context) : View(ctx) {
         up[0] = ct * cp; up[1] = st * cp; up[2] = sp
         Ueq[0] = up[0]; Ueq[1] = up[1]; Ueq[2] = up[2]
         for (i in 0..2) { w0[i] = cps * e[i] - sps * n[i]; w1[i] = sps * e[i] + cps * n[i] }
-        val r = rot
+        val r = frameRot
         for (i in 0..2) for (k in 0..2) M[i * 3 + k] = r[i] * w0[k] + r[3 + i] * w1[k] + r[6 + i] * up[k]
     }
 
     private var bufA = FloatArray(0); private var bufB = FloatArray(0); private var bufC = FloatArray(0)
     private val ptPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeCap = Paint.Cap.ROUND; style = Paint.Style.STROKE }
 
-    private fun drawStars(c: Canvas, jd: Double, f: Float, zoom: Float, fade: Float) {
-        val st = Astro.stars(jd); if (st.isEmpty()) return
+    private fun drawStars(c: Canvas, st: List<Body>, f: Float, zoom: Float, fade: Float) {
+        if (st.isEmpty()) return
         if (bufA.size < st.size * 2) { bufA = FloatArray(st.size * 2); bufB = FloatArray(st.size * 2); bufC = FloatArray(st.size * 2) }
         var na = 0; var nb = 0; var nc = 0
         val m = M; val u = Ueq; val w = width.toFloat(); val h = height.toFloat(); val cx = w / 2; val cy = h / 2; val k2 = 2.0 * f
@@ -680,7 +685,7 @@ class SkyView(ctx: Context) : View(ctx) {
         val index = ((azimuth.toInt() % 360) + 360) % 360
         val ce = cos(Math.toRadians(altitude)); val se = sin(Math.toRadians(altitude))
         val wx = ce * azimuthSin[index]; val wy = ce * azimuthCos[index]; val wz = se
-        val r = rot
+        val r = frameRot
         val dx = r[0] * wx + r[3] * wy + r[6] * wz
         val dy = r[1] * wx + r[4] * wy + r[7] * wz
         val dz = r[2] * wx + r[5] * wy + r[8] * wz
@@ -793,22 +798,21 @@ class SkyView(ctx: Context) : View(ctx) {
             trace.clear(); traceLabels.clear()
             val star = Astro.starByName(jd, name)
             // Stars repeat their apparent sky path after one sidereal day; solar-system
-            // objects use 24 hours. Twenty-minute samples keep the curve smooth
-            // without doing hundreds of planetary calculations after a selection.
-            val steps = 72
+            // objects use 24 hours. Five-minute samples keep the apparent sky path smooth.
+            val steps = 288
             val spanDays = if (star != null) 0.9972695663 else 1.0
             for (k in 0..steps) {
                 val j = jd + spanDays * k / steps
-                val b = star ?: Astro.all(j, false).firstOrNull { it.name == name } ?: return
+                val b = star ?: Astro.bodyAt(j, name) ?: return
                 val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, j)
                 val azRad = Math.toRadians(az - decl); val altRad = Math.toRadians(alt)
                 trace.add(doubleArrayOf(cos(altRad) * sin(azRad), cos(altRad) * cos(azRad), sin(altRad)))
-                traceLabels.add(if (k > 0 && k < steps && k % 18 == 0) timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong())) else null)
+                traceLabels.add(if (k > 0 && k < steps && k % 72 == 0) timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong())) else null)
             }
         }
         tracePath.rewind()
         var prevOk = false
-        val r = rot; val cx = width / 2f; val cy = height / 2f; val k2 = 2.0 * f
+        val r = frameRot; val cx = width / 2f; val cy = height / 2f; val k2 = 2.0 * f
         for (k in trace.indices) {
             val t = trace[k]
             val dx = r[0] * t[0] + r[3] * t[1] + r[6] * t[2]
@@ -821,7 +825,7 @@ class SkyView(ctx: Context) : View(ctx) {
             if (prevOk) tracePath.lineTo(x, y) else tracePath.moveTo(x, y)
             // Hourly markers; label only every six hours. Leave the final sample
             // unlabeled and undotted so it cannot duplicate the starting timestamp.
-            if (k < trace.lastIndex && k % 3 == 0) {
+            if (k < trace.lastIndex && k % 12 == 0) {
                 val a = 230
                 p.style = Paint.Style.FILL; p.color = withAlpha(0xFF9BE7FF.toInt(), a)
                 c.drawCircle(x, y, 3.2f * dp, p)
@@ -839,7 +843,7 @@ class SkyView(ctx: Context) : View(ctx) {
         val b = bodies.firstOrNull { it.name == selected } ?: Astro.starByName(jd, selected ?: "") ?: return
         val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, jd)
         val a = Math.toRadians(az - decl); val e = Math.toRadians(alt)
-        val wx = cos(e) * sin(a); val wy = cos(e) * cos(a); val wz = sin(e); val r = rot
+        val wx = cos(e) * sin(a); val wy = cos(e) * cos(a); val wz = sin(e); val r = frameRot
         val dx = r[0] * wx + r[3] * wy + r[6] * wz; val dy = r[1] * wx + r[4] * wy + r[7] * wz; val dz = r[2] * wx + r[5] * wy + r[8] * wz
         val sep = Math.toDegrees(acos((-dz).coerceIn(-1.0, 1.0)))
         if (sep < fovDeg * 0.45) return

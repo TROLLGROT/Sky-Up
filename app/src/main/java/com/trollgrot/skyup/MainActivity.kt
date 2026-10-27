@@ -92,6 +92,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         night = nightAt(prefs.getFloat("lat", 0f).toDouble(), prefs.getFloat("lon", 0f).toDouble(), prefs.contains("lat"))
         Catalog.load(this)
+        Astro.stars(Astro.jd(System.currentTimeMillis()))
         sky = SkyView(this).apply {
             showConstellations = prefs.getBoolean("cons", true); showConNames = prefs.getBoolean("conNames", true)
             showGround = prefs.getBoolean("ground", false); showGrid = prefs.getBoolean("grid", false)
@@ -153,8 +154,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val mag = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         useGame = game != null && mag != null
         // gyro-driven (smooth, no drift in short term) + slow magnetic heading correction
-        if (useGame) { sm.registerListener(this, game, SensorManager.SENSOR_DELAY_GAME); sm.registerListener(this, mag, SensorManager.SENSOR_DELAY_UI) }
-        else if (mag != null) sm.registerListener(this, mag, SensorManager.SENSOR_DELAY_GAME)
+        if (useGame) { sm.registerListener(this, game, SENSOR_PERIOD_US); sm.registerListener(this, mag, SensorManager.SENSOR_DELAY_UI) }
+        else if (mag != null) sm.registerListener(this, mag, SENSOR_PERIOD_US)
         startLocation()
     }
 
@@ -234,7 +235,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         SensorManager.getRotationMatrixFromVector(rg, qVector)
         trackCalibration(q)
         if (useGame && haveMag && psiN > 0) applyPsi() else rg.copyInto(rot)
-        sky.rot = rot
+        // Publish an immutable snapshot; SkyView reads it while rendering on the UI thread.
+        sky.rot = rot.copyOf()
         // Share the frame limiter with dwell selection and pinch gestures.
         sky.requestFrame()
     }
@@ -693,11 +695,12 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         panel.addView(header)
         val pages = listOf(LinearLayout(this), LinearLayout(this), LinearLayout(this))
         pages.forEach { it.orientation = LinearLayout.VERTICAL }
+        val pageScrollViews = pages.map { page -> ScrollView(this).apply { addView(page) } }
         val content = FrameLayout(this)
         val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun showPage(index: Int) {
             content.removeAllViews()
-            content.addView(ScrollView(this).apply { addView(pages[index]) }, FrameLayout.LayoutParams(-1, -1))
+            content.addView(pageScrollViews[index], FrameLayout.LayoutParams(-1, -1))
         }
         listOf(L.t("GENERAL", "ОБЩЕЕ"), L.t("SKY", "НЕБО"), L.t("STARS", "ЗВЁЗДЫ")).forEachIndexed { index, title ->
             tabs.addView(Button(this).apply {
@@ -862,5 +865,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     companion object {
         private const val LOCATION_PERMISSION_REQUEST = 41
+        private const val SENSOR_PERIOD_US = 16_667
     }
 }

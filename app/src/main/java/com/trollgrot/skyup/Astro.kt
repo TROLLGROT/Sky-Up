@@ -26,6 +26,38 @@ object Astro {
     private val NAMES = arrayOf("Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune")
     private val MAGS = doubleArrayOf(0.0, -4.0, 0.0, 0.5, -2.0, 0.5, 5.7, 7.8)
 
+    /** Position of one solar-system body, without calculating every other planet. */
+    fun bodyAt(jd: Double, name: String): Body? {
+        val d = jd - 2451545.0
+        val T = d / 36525.0
+        val earth = helio(2, T)
+        if (name == "Sun") {
+            val (ra, dec) = eclToEq(-earth[0], -earth[1], -earth[2], 23.43928)
+            val (pr, pd) = precess(ra, dec, jd)
+            return Body(name, "Star (our Sun)", pr, pd, -26.7)
+        }
+        if (name == "Moon") {
+            val L = 218.316 + 13.176396 * d
+            val M = (134.963 + 13.064993 * d) * D
+            val F = (93.272 + 13.229350 * d) * D
+            val lon = (L + 6.289 * sin(M)) * D
+            val lat = 5.128 * sin(F) * D
+            val (ra, dec) = eclToEq(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat), 23.4393 - 0.0000004 * d)
+            val (pr, pd) = precess(ra, dec, jd)
+            val distance = 385001 - 20905 * cos(M)
+            return Body(name, "Natural satellite", pr, pd, -10.0, "Distance %,d km".format(distance.toInt()))
+        }
+        val index = NAMES.indexOf(name)
+        if (index >= 0 && index != 2) {
+            val planet = helio(index, T)
+            val x = planet[0] - earth[0]; val y = planet[1] - earth[1]; val z = planet[2] - earth[2]
+            val (ra, dec) = eclToEq(x, y, z, 23.43928)
+            val (pr, pd) = precess(ra, dec, jd)
+            return Body(name, "Planet", pr, pd, MAGS[index])
+        }
+        return starByName(jd, name)
+    }
+
     /** Heliocentric ecliptic J2000 position (AU). */
     fun helio(i: Int, T: Double): DoubleArray {
         val e = EL[i]
@@ -66,21 +98,55 @@ object Astro {
         STARS.split(";").map { val p = it.split(","); Body(p[0], "Star", p[1].toDouble() * 15, p[2].toDouble(), p[3].toDouble()) }
     }
 
-    private var starCache: List<Body>? = null
-    private var starCacheJd = 0.0
-    private var starMap: HashMap<String, Body>? = null
-    fun stars(jd: Double): List<Body> = precessedStars(jd)
-    fun starByName(jd: Double, name: String): Body? {
-        val l = precessedStars(jd); var m = starMap
-        if (m == null) { m = HashMap(); for (b in l) m.putIfAbsent(b.name, b); starMap = m }
-        return m[name]
+    @Volatile private var starCache: List<Body>? = null
+    @Volatile private var starCacheJd = 0.0
+    @Volatile private var starMap: Map<String, Body>? = null
+    @Volatile private var starCacheLoading = false
+    private val starCacheLock = Any()
+
+    /** Returns cached positions immediately and prepares a new epoch off the UI thread. */
+    fun stars(jd: Double): List<Body> {
+        val cached = starCache
+        if (cached == null || abs(jd - starCacheJd) >= 2.0) prepareStars(jd)
+        val current = starCache ?: return emptyList()
+        return if (abs(jd - starCacheJd) < 2.0) current else emptyList()
     }
-    private fun precessedStars(jd: Double): List<Body> {
-        val c = starCache
-        if (c != null && abs(jd - starCacheJd) < 2.0) return c
-        val src = if (Catalog.stars.isNotEmpty()) Catalog.stars else starList
-        val l = src.map { s -> val (r, de) = precess(s.ra, s.dec, jd); Body(s.name, s.type, r, de, s.mag, "", s.bv) }
-        starCache = l; starCacheJd = jd; starMap = null; return l
+
+    private fun prepareStars(jd: Double) {
+        var startWorker = false
+        synchronized(starCacheLock) {
+            if (!starCacheLoading) {
+                starCacheLoading = true
+                startWorker = true
+            }
+        }
+        if (!startWorker) return
+        Thread({
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                val src = if (Catalog.stars.isNotEmpty()) Catalog.stars else starList
+                val fresh = src.map { s ->
+                    val (r, de) = precess(s.ra, s.dec, jd)
+                    Body(s.name, s.type, r, de, s.mag, "", s.bv)
+                }
+                val byName = HashMap<String, Body>(fresh.size)
+                for (body in fresh) byName.putIfAbsent(body.name, body)
+                synchronized(starCacheLock) {
+                    starCache = fresh
+                    starCacheJd = jd
+                    starMap = byName
+                    starCacheLoading = false
+                }
+            } catch (_: Exception) {
+                synchronized(starCacheLock) { starCacheLoading = false }
+            }
+        }, "sky-star-positions").apply { isDaemon = true; start() }
+    }
+
+    fun starByName(jd: Double, name: String): Body? {
+        val l = stars(jd)
+        if (l.isEmpty()) return null
+        return starMap?.get(name)
     }
 
     fun all(jd: Double, withStars: Boolean = true): List<Body> {
@@ -109,7 +175,7 @@ object Astro {
             val (pr, pd) = precess(r, de, jd)
             out.add(Body(NAMES[i], "Planet", pr, pd, MAGS[i], "Distance from Earth %.3f AU".format(sqrt(x * x + y * y + z * z))))
         }
-        if (withStars) out.addAll(precessedStars(jd))
+        if (withStars) out.addAll(stars(jd))
         return out
     }
 
