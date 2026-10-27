@@ -687,6 +687,7 @@ class SkyView(ctx: Context) : View(ctx) {
         val dist = if (body.dist.isEmpty()) "" else "\n" + (if (L.ru) body.dist.replace("Distance from Earth", "Расстояние от Земли").replace("Distance", "Расстояние").replace(" AU", " а.е.").replace(" km", " км") else body.dist)
         val star = if (body.type == "Star") {
             val facts = Catalog.starFacts[body.name]
+            val highlight = Catalog.starHighlights[body.name]?.let { L.t(it.first, it.second) }
             val colorClass = when {
                 body.bv < -0.2 -> "O/B"
                 body.bv < 0.0 -> "B"
@@ -696,9 +697,9 @@ class SkyView(ctx: Context) : View(ctx) {
                 body.bv < 1.4 -> "K"
                 else -> "M"
             }
-            if (facts != null) "\n\n${L.t("ABOUT THIS STAR", "О ЗВЕЗДЕ")}\n${L.t("Class", "Класс")}: ${facts.kind}\n${L.t("Radius", "Радиус")}: ${facts.radius}\n${L.t("Mass", "Масса")}: ${facts.mass}\n${L.t("Distance from Earth", "Расстояние от Земли")}: ${facts.distanceLy}\n\n${facts.note}\n${L.t("Values are rounded reference estimates.", "Значения округлены и приведены для справки.")}"
+            if (facts != null) "\n\n${L.t("ABOUT THIS STAR", "О ЗВЕЗДЕ")}\n${L.t("Class", "Класс")}: ${facts.kind}\n${L.t("Radius", "Радиус")}: ${facts.radius}\n${L.t("Mass", "Масса")}: ${facts.mass}\n${L.t("Distance from Earth", "Расстояние от Земли")}: ${facts.distanceLy}\n\n${L.t("DID YOU KNOW?", "ИНТЕРЕСНЫЙ ФАКТ")}: ${highlight ?: facts.note}\n${L.t("Values are rounded reference estimates.", "Значения округлены и приведены для справки.")}"
             else "\n\n${L.t("ABOUT THIS STAR", "О ЗВЕЗДЕ")}\n${L.t("Approximate colour class", "Примерный спектральный класс по цвету")}: $colorClass\n${L.t("Color index B−V", "Индекс цвета B−V")}: %.2f\n".format(body.bv) +
-                L.t("The catalog has no reliable radius, mass or distance for this star yet.", "В каталоге пока нет надёжных данных о радиусе, массе и расстоянии этой звезды.")
+                (highlight?.let { "\n${L.t("DID YOU KNOW?", "ИНТЕРЕСНЫЙ ФАКТ")}: $it" } ?: L.t("The catalog has no reliable radius, mass or distance for this star yet.", "В каталоге пока нет надёжных данных о радиусе, массе и расстоянии этой звезды."))
         } else ""
         val physical = Catalog.bodyFacts[body.name]?.let { facts ->
             "\n\n${L.t("PHYSICAL DATA", "ФИЗИЧЕСКИЕ ДАННЫЕ")}" +

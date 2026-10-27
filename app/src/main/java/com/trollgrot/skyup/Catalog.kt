@@ -28,14 +28,14 @@ object Catalog {
         val day: String, val year: String, val factEn: String, val factRu: String
     )
     val bodyFacts = mapOf(
-        "Sun" to BodyFacts("695,700", "1.9885 × 10³⁰", "274 m/s²", "25–35 days (rotation varies by latitude)", "≈ 230 million years around the Milky Way", "The Sun is a G-type main-sequence star; fusion in its core powers its light.", "Солнце — звезда главной последовательности типа G; свет рождается при термоядерном синтезе в ядре."),
+        "Sun" to BodyFacts("695,700", "1.9885 × 10³⁰", "274 m/s²", "25–35 days (rotation varies by latitude)", "≈ 230 million years around the Milky Way", "The Sun contains about 99.8% of the Solar System's mass. Its magnetic activity rises and falls in an approximately 11-year cycle.", "В Солнце сосредоточено около 99,8% массы Солнечной системы. Его магнитная активность меняется циклом примерно в 11 лет."),
         "Mercury" to BodyFacts("2,439.7", "3.301 × 10²³", "3.70 m/s²", "58.6 Earth days", "88 Earth days", "A day-night cycle on Mercury lasts two of its years.", "Цикл от восхода до следующего восхода на Меркурии длится два его года."),
         "Venus" to BodyFacts("6,051.8", "4.867 × 10²⁴", "8.87 m/s²", "243 Earth days (retrograde)", "225 Earth days", "Its dense carbon-dioxide atmosphere creates surface pressure about 92 times Earth's.", "Плотная атмосфера из углекислого газа создаёт у поверхности давление примерно в 92 раза выше земного."),
         "Earth" to BodyFacts("6,371", "5.972 × 10²⁴", "9.81 m/s²", "23 h 56 min", "365.256 days", "The only world known to host life; liquid water covers most of its surface.", "Единственный известный мир с жизнью; большая часть поверхности покрыта жидкой водой."),
         "Moon" to BodyFacts("1,737.4", "7.342 × 10²²", "1.62 m/s²", "Synchronous rotation", "27.32 days around Earth", "The Moon keeps nearly the same hemisphere facing Earth and slowly recedes from us.", "Луна почти всегда обращена к Земле одной стороной и медленно удаляется от нас."),
-        "Mars" to BodyFacts("3,389.5", "6.417 × 10²³", "3.71 m/s²", "24 h 37 min", "687 Earth days", "Olympus Mons is the largest known volcano in the Solar System.", "На Марсе находится Олимп — крупнейший известный вулкан Солнечной системы."),
-        "Jupiter" to BodyFacts("69,911", "1.898 × 10²⁷", "24.79 m/s²", "9 h 56 min", "11.86 Earth years", "Europa, one of Jupiter's moons, is believed to hide a deep global saltwater ocean beneath its ice.", "Подо льдом Европы, спутника Юпитера, вероятно, скрывается глубокий глобальный океан солёной воды."),
-        "Saturn" to BodyFacts("58,232", "5.683 × 10²⁶", "10.44 m/s²", "10 h 33 min", "29.45 Earth years", "Enceladus has a subsurface ocean; icy jets from its south pole let spacecraft sample material from it.", "Под Энцеладом есть океан; ледяные выбросы у южного полюса позволяют исследовать его вещество."),
+        "Mars" to BodyFacts("3,389.5", "6.417 × 10²³", "3.71 m/s²", "24 h 37 min", "687 Earth days", "Olympus Mons is a giant shield volcano about 22 km high. Mars also has Valles Marineris, a canyon system stretching thousands of kilometres.", "Щитовой вулкан Олимп возвышается примерно на 22 км. На Марсе также находится система каньонов Долины Маринера длиной в тысячи километров."),
+        "Jupiter" to BodyFacts("69,911", "1.898 × 10²⁷", "24.79 m/s²", "9 h 56 min", "11.86 Earth years", "Jupiter's Great Red Spot is a long-lived storm larger than Earth. Its moons are worlds of their own: volcanic Io, ocean-bearing Europa, and magnetic-field-bearing Ganymede.", "Большое красное пятно — долгоживущий шторм, превосходящий Землю по размеру. Его спутники — отдельные миры: вулканический Ио, Европа с вероятным подлёдным океаном и Ганимед с собственным магнитным полем."),
+        "Saturn" to BodyFacts("58,232", "5.683 × 10²⁶", "10.44 m/s²", "10 h 33 min", "29.45 Earth years", "Saturn's rings are extremely wide but remarkably thin. Titan has lakes and seas of liquid methane and ethane; Enceladus sprays material from its hidden ocean into space.", "Кольца Сатурна огромны по ширине, но очень тонкие. На Титане есть озёра и моря из жидких метана и этана, а Энцелад выбрасывает в космос вещество своего скрытого океана."),
         "Uranus" to BodyFacts("25,362", "8.681 × 10²⁵", "8.69 m/s²", "17 h 14 min (retrograde)", "84 Earth years", "Uranus rotates almost on its side, producing extreme seasons.", "Уран вращается почти лёжа на боку, поэтому его сезоны особенно необычны."),
         "Neptune" to BodyFacts("24,622", "1.024 × 10²⁶", "11.15 m/s²", "16 h 6 min", "164.8 Earth years", "Neptune's atmosphere hosts the fastest winds measured on any planet.", "В атмосфере Нептуна дуют самые быстрые ветры среди планет."),
     )
@@ -60,6 +60,32 @@ object Catalog {
         "Achernar" to StarFacts("B6 V · голубая звезда", "≈ 9 R☉", "≈ 6.7 M☉", "139 св. лет", "Очень быстро вращается и сильно сплюснута."),
         "Mimosa" to StarFacts("B0.5 III · голубой гигант", "8.4 R☉", "16 M☉", "280 св. лет", "Также известна как Бета Южного Креста."),
         "Castor" to StarFacts("A1 V · кратная система", "2.4 R☉ (основной компонент)", "2.4 M☉ (основной компонент)", "51 св. год", "Система из шести звёзд в трёх визуальных парах.")
+    )
+
+    // Short, curated stories for other named stars in the sky catalog. Unknown
+    // measurements remain explicitly unavailable instead of being guessed.
+    val starHighlights = mapOf(
+        "Rigil Kentaurus" to ("Alpha Centauri is a three-star system; its two main stars orbit one another." to "Альфа Центавра — система из трёх звёзд; две главные обращаются друг вокруг друга."),
+        "Mizar" to ("Mizar and Alcor are a famous naked-eye pair in the Big Dipper; Mizar itself is a multiple-star system." to "Мицар и Алькор — известная пара звёзд Большого Ковша, различимая невооружённым глазом; сам Мицар — кратная система."),
+        "Algol" to ("Algol is an eclipsing binary: its brightness regularly dips when one star passes in front of the other." to "Алголь — затменная двойная система: её яркость регулярно падает, когда одна звезда проходит перед другой."),
+        "Mira" to ("Mira is a pulsating red giant whose brightness changes dramatically over a regular cycle." to "Мира — пульсирующий красный гигант, чья яркость заметно меняется со временем."),
+        "Mintaka" to ("Mintaka is one of the three bright stars that form Orion's Belt; it is itself a multiple system." to "Минтака — одна из трёх ярких звёзд Пояса Ориона; сама она является кратной системой."),
+        "Alnilam" to ("Alnilam is the middle star of Orion's Belt and a luminous blue supergiant." to "Альнилам — средняя звезда Пояса Ориона и яркий голубой сверхгигант."),
+        "Alnitak" to ("Alnitak marks the eastern end of Orion's Belt and is a multiple-star system." to "Альнитак отмечает восточный край Пояса Ориона и входит в кратную систему."),
+        "Aldebaran" to ("Aldebaran appears among the Hyades, but it lies much closer to us and is not part of that star cluster." to "Альдебаран виден среди Гиад, но находится намного ближе к нам и не входит в это звёздное скопление."),
+        "Antares" to ("Antares is a red supergiant near the end of its life; its name means 'rival of Mars' because of its reddish colour." to "Антарес — красный сверхгигант на позднем этапе жизни. Его имя означает «соперник Марса» из-за красноватого цвета."),
+        "Fomalhaut" to ("A prominent debris ring surrounds Fomalhaut, making it an important nearby example of a planetary system in formation." to "Вокруг Фомальгаута наблюдается заметное кольцо обломков — пример материала, из которого могут формироваться планеты."),
+        "Deneb" to ("Deneb is one corner of the Summer Triangle, alongside Vega and Altair." to "Денеб — одна из вершин Летнего треугольника вместе с Вегой и Альтаиром."),
+        "Bellatrix" to ("Bellatrix marks Orion's western shoulder and is one of the constellation's bright blue stars." to "Беллатрикс отмечает западное плечо Ориона и относится к ярким голубым звёздам созвездия."),
+        "Saiph" to ("Saiph marks Orion's southeastern foot; together with Rigel, Betelgeuse and Bellatrix it outlines the Hunter's bright figure." to "Саиф отмечает юго-восточную ногу Ориона; вместе с Ригелем, Бетельгейзе и Беллатрикс она очерчивает фигуру Ориона."),
+        "Alcyone" to ("Alcyone is the brightest star in the Pleiades, a young open cluster visible to the naked eye." to "Альциона — ярчайшая звезда Плеяд, молодого рассеянного скопления, видимого невооружённым глазом."),
+        "Electra" to ("Electra is one of the bright blue-white stars in the Pleiades cluster." to "Электра — одна из ярких голубовато-белых звёзд скопления Плеяды."),
+        "Maia" to ("Maia is a blue-white member of the Pleiades; the cluster's stars formed from the same cloud of gas and dust." to "Майя — голубовато-белая звезда Плеяд; звёзды скопления сформировались из одного облака газа и пыли."),
+        "Alpheratz" to ("Alpheratz is shared by the constellations Andromeda and Pegasus in traditional sky maps." to "Альферац традиционно связывают сразу с созвездиями Андромеды и Пегаса."),
+        "Mirach" to ("Mirach is a red giant in Andromeda; a distant galaxy can appear nearby in the same line of sight." to "Мирах — красный гигант в Андромеде; далёкая галактика может казаться расположенной рядом с ним на небе."),
+        "Almach" to ("Almach is a beautiful contrasting double star, with golden and blue-white components." to "Алмах — выразительная контрастная двойная звезда с золотистым и голубовато-белым компонентами."),
+        "Polaris" to ("Polaris is a Cepheid variable: its small, regular pulsations help astronomers measure cosmic distances." to "Полярная звезда — цефеида: её регулярные пульсации помогают астрономам измерять расстояния во Вселенной."),
+        "Vega" to ("Vega is surrounded by a debris disk and was one of the first stars found to have excess infrared emission." to "Вегу окружает диск обломков; она стала одной из первых звёзд, у которых обнаружили избыток инфракрасного излучения.")
     )
 
     fun load(ctx: Context) {

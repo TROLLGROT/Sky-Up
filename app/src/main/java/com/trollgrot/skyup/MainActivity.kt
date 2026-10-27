@@ -673,7 +673,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                     canvas.save(); canvas.rotate(-17f, cx, cy)
                     artPaint.style = android.graphics.Paint.Style.STROKE; artPaint.strokeWidth = dp(4).toFloat(); artPaint.color = 0xB8D6B77E.toInt()
                     canvas.drawOval(cx - radius * 2.05f, cy - radius * 0.54f, cx + radius * 2.05f, cy + radius * 0.54f, artPaint)
-                    artPaint.strokeWidth = dp(1.5f).toFloat(); artPaint.color = 0xDDF3DEB1.toInt()
+                    artPaint.strokeWidth = 1.5f * resources.displayMetrics.density; artPaint.color = 0xDDF3DEB1.toInt()
                     canvas.drawOval(cx - radius * 1.72f, cy - radius * 0.43f, cx + radius * 1.72f, cy + radius * 0.43f, artPaint)
                     artPaint.style = android.graphics.Paint.Style.FILL; canvas.restore()
                 }
