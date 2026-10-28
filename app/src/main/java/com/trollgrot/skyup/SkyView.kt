@@ -2,6 +2,9 @@ package com.trollgrot.skyup
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Bitmap
+import android.graphics.BitmapShader
+import android.graphics.Matrix
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
@@ -38,9 +41,13 @@ class SkyView(ctx: Context) : View(ctx) {
     private var traceLat = Double.NaN
     private var traceLon = Double.NaN
     private var traceDecl = Double.NaN
+    private var traceIntervalMinutes = -1
     private val trace = ArrayList<DoubleArray>()
     private val traceLabels = ArrayList<String?>()
     private val tracePath = Path()
+    private val bodyPhotos = HashMap<String, Bitmap>()
+    private val requestedBodyPhotos = HashSet<String>()
+    var onRequestBodyPhoto: ((String) -> Unit)? = null
     private var forecastName: String? = null
     private var forecastSecond = Long.MIN_VALUE
     private var forecastJd = Double.NaN
@@ -66,6 +73,14 @@ class SkyView(ctx: Context) : View(ctx) {
         selected = name; val jd = Astro.jd(now())
         if (openDetails) Astro.all(jd).firstOrNull { it.name == name }?.let { onSelect?.invoke(info(it, jd)) }
         invalidate()
+    }
+    fun setBodyPhoto(name: String, bitmap: Bitmap) {
+        bodyPhotos[name] = bitmap
+        invalidate()
+    }
+    private fun requestBodyPhoto(name: String, x: Float, y: Float, focal: Float) {
+        if (focusAlpha(x, y, focal) < 0.55f || bodyPhotos.containsKey(name) || !requestedBodyPhotos.add(name)) return
+        onRequestBodyPhoto?.invoke(name)
     }
     var onSelect: ((String?) -> Unit)? = null
 
@@ -254,14 +269,22 @@ class SkyView(ctx: Context) : View(ctx) {
                 "Moon" -> 12f * dp + 12f * dp * zoom
                 else -> if (body.type == "Planet") planetRadius(body.name, zoom) else starRadius(body.mag)
             }
-            if (body.name == "Sun") drawSun(canvas, point, radius, dim)
+            if (body.name == "Sun") {
+                if (radius >= 16f * dp) requestBodyPhoto(body.name, point.x, point.y, focal)
+                val sunPhoto = bodyPhotos["Sun"]
+                if (sunPhoto != null) drawPhotoSphere(canvas, sunPhoto, point, radius, dim) else drawSun(canvas, point, radius, dim)
+            }
             else if (body.name == "Moon") {
+                if (radius >= 16f * dp) requestBodyPhoto(body.name, point.x, point.y, focal)
                 val sun = bodies.first { it.name == "Sun" }
                 val elongation = acos((sun.vx * body.vx + sun.vy * body.vy + sun.vz * body.vz).coerceIn(-1.0, 1.0))
                 val waxing = Astro.norm(body.ra - sun.ra) < 180.0
                 drawMoon(canvas, point, radius, dim, elongation, waxing)
             }
-            else if (body.type == "Planet") { if (radius < 7f * dp) drawGlowPlanet(canvas, body, point, dim) else drawPlanet(canvas, body.name, point, radius, dim, zoom) }
+            else if (body.type == "Planet") {
+                if (radius >= 10f * dp) requestBodyPhoto(body.name, point.x, point.y, focal)
+                if (radius < 7f * dp) drawGlowPlanet(canvas, body, point, dim) else drawPlanet(canvas, body.name, point, radius, dim, zoom)
+            }
             else drawStar(canvas, point, radius, dim, body.mag, body.bv)
 
             if ((body.name == "Sun" || body.name == "Moon" || body.type == "Planet") && drawPlanetNames)
@@ -495,21 +518,27 @@ class SkyView(ctx: Context) : View(ctx) {
 
         val save = canvas.save()
         canvas.clipPath(lit)
-        p.shader = RadialGradient(point.x - radius * 0.32f, point.y - radius * 0.35f, radius * 1.7f,
-            intArrayOf(0xFFFFFFFF.toInt(), 0xFFE1E5E9.toInt(), 0xFF9AA4B1.toInt()), null, Shader.TileMode.CLAMP)
-        canvas.drawCircle(point.x, point.y, radius, p)
-        p.shader = null
-        val maria = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = withAlpha(0xFF747E8B.toInt(), (70 * dim).toInt()) }
-        canvas.drawOval(point.x - radius * 0.68f, point.y - radius * 0.12f, point.x - radius * 0.05f, point.y + radius * 0.34f, maria)
-        canvas.drawOval(point.x + radius * 0.08f, point.y - radius * 0.7f, point.x + radius * 0.42f, point.y - radius * 0.22f, maria)
-        val craterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = withAlpha(0xFF687483.toInt(), (100 * dim).toInt()) }
-        val craters = floatArrayOf(-0.28f, 0.14f, 0.18f, 0.24f, -0.30f, 0.12f, 0.32f, 0.34f, 0.10f, -0.12f, 0.55f, 0.09f, 0.47f, -0.50f, 0.08f, -0.58f, -0.42f, 0.07f, -0.62f, 0.42f, 0.06f)
-        for (i in craters.indices step 3) {
-            val x = point.x + craters[i] * radius; val y = point.y + craters[i + 1] * radius; val r = craters[i + 2] * radius
-            canvas.drawCircle(x, y, r, craterPaint)
-            craterPaint.color = withAlpha(0xFFF4F5F6.toInt(), (55 * dim).toInt())
-            canvas.drawCircle(x - r * 0.18f, y - r * 0.18f, r * 0.74f, craterPaint)
-            craterPaint.color = withAlpha(0xFF687483.toInt(), (100 * dim).toInt())
+        val moonPhoto = bodyPhotos["Moon"]
+        if (moonPhoto != null) drawPhotoSphere(canvas, moonPhoto, point, radius, dim)
+        else {
+            p.shader = RadialGradient(point.x - radius * 0.32f, point.y - radius * 0.35f, radius * 1.7f,
+                intArrayOf(0xFFFFFFFF.toInt(), 0xFFE1E5E9.toInt(), 0xFF9AA4B1.toInt()), null, Shader.TileMode.CLAMP)
+            canvas.drawCircle(point.x, point.y, radius, p)
+            p.shader = null
+        }
+        if (moonPhoto == null) {
+            val maria = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = withAlpha(0xFF747E8B.toInt(), (70 * dim).toInt()) }
+            canvas.drawOval(point.x - radius * 0.68f, point.y - radius * 0.12f, point.x - radius * 0.05f, point.y + radius * 0.34f, maria)
+            canvas.drawOval(point.x + radius * 0.08f, point.y - radius * 0.7f, point.x + radius * 0.42f, point.y - radius * 0.22f, maria)
+            val craterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = withAlpha(0xFF687483.toInt(), (100 * dim).toInt()) }
+            val craters = floatArrayOf(-0.28f, 0.14f, 0.18f, 0.24f, -0.30f, 0.12f, 0.32f, 0.34f, 0.10f, -0.12f, 0.55f, 0.09f, 0.47f, -0.50f, 0.08f, -0.58f, -0.42f, 0.07f, -0.62f, 0.42f, 0.06f)
+            for (i in craters.indices step 3) {
+                val x = point.x + craters[i] * radius; val y = point.y + craters[i + 1] * radius; val r = craters[i + 2] * radius
+                canvas.drawCircle(x, y, r, craterPaint)
+                craterPaint.color = withAlpha(0xFFF4F5F6.toInt(), (55 * dim).toInt())
+                canvas.drawCircle(x - r * 0.18f, y - r * 0.18f, r * 0.74f, craterPaint)
+                craterPaint.color = withAlpha(0xFF687483.toInt(), (100 * dim).toInt())
+            }
         }
         canvas.restoreToCount(save)
 
@@ -531,6 +560,16 @@ class SkyView(ctx: Context) : View(ctx) {
         }
 
         if (name == "Saturn" || name == "Uranus") drawRings(canvas, point, radius, name == "Saturn", dim)
+
+        val photo = bodyPhotos[name]
+        if (photo != null && radius >= 10f * dp) {
+            drawPhotoSphere(canvas, photo, point, radius, dim)
+            p.style = Paint.Style.STROKE; p.strokeWidth = 0.7f * dp
+            p.color = withAlpha(0xFFE8F3FF.toInt(), (110 * dim).toInt())
+            canvas.drawCircle(point.x, point.y, radius, p)
+            p.style = Paint.Style.FILL; p.alpha = 255
+            return
+        }
 
         val disc = Path().apply { addCircle(point.x, point.y, radius, Path.Direction.CW) }
         val save = canvas.save()
@@ -559,6 +598,25 @@ class SkyView(ctx: Context) : View(ctx) {
         canvas.drawCircle(point.x, point.y, radius, p)
         p.style = Paint.Style.FILL
         p.alpha = 255
+    }
+
+    /** Draw a real NASA full-disk preview clipped to a sphere instead of synthetic terrain. */
+    private fun drawPhotoSphere(canvas: Canvas, bitmap: Bitmap, point: Projected, radius: Float, dim: Float) {
+        if (bitmap.width <= 0 || bitmap.height <= 0) return
+        val shader = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        val scale = max((2f * radius) / bitmap.width, (2f * radius) / bitmap.height)
+        val transform = Matrix().apply {
+            setScale(scale, scale)
+            postTranslate(point.x - bitmap.width * scale * 0.5f, point.y - bitmap.height * scale * 0.5f)
+        }
+        shader.setLocalMatrix(transform)
+        p.shader = shader; p.style = Paint.Style.FILL; p.alpha = (255 * dim).toInt().coerceIn(0, 255)
+        canvas.drawCircle(point.x, point.y, radius, p)
+        p.shader = null; p.alpha = 255
+        p.shader = RadialGradient(point.x - radius * 0.3f, point.y - radius * 0.33f, radius * 1.55f,
+            intArrayOf(0x08FFFFFF, 0x00000000, withAlpha(0xFF020611.toInt(), (205 * dim).toInt())), floatArrayOf(0f, 0.58f, 1f), Shader.TileMode.CLAMP)
+        canvas.drawCircle(point.x, point.y, radius, p)
+        p.shader = null
     }
 
     private fun drawRings(canvas: Canvas, point: Projected, radius: Float, saturn: Boolean, dim: Float) {
@@ -688,6 +746,7 @@ class SkyView(ctx: Context) : View(ctx) {
         val star = if (body.type == "Star") {
             val facts = Catalog.starFacts[body.name]
             val highlight = Catalog.starHighlights[body.name]?.let { L.t(it.first, it.second) }
+            val definition = "\n\n${L.t("WHAT IS A STAR?", "ЧТО ТАКОЕ ЗВЕЗДА?")}\n${L.t(Catalog.starDefinitionEn, Catalog.starDefinitionRu)}"
             val colorClass = when {
                 body.bv < -0.2 -> "O/B"
                 body.bv < 0.0 -> "B"
@@ -697,12 +756,13 @@ class SkyView(ctx: Context) : View(ctx) {
                 body.bv < 1.4 -> "K"
                 else -> "M"
             }
-            if (facts != null) "\n\n${L.t("ABOUT THIS STAR", "О ЗВЕЗДЕ")}\n${L.t("Class", "Класс")}: ${facts.kind}\n${L.t("Radius", "Радиус")}: ${facts.radius}\n${L.t("Mass", "Масса")}: ${facts.mass}\n${L.t("Distance from Earth", "Расстояние от Земли")}: ${facts.distanceLy}\n\n${L.t("DID YOU KNOW?", "ИНТЕРЕСНЫЙ ФАКТ")}: ${highlight ?: facts.note}\n${L.t("Values are rounded reference estimates.", "Значения округлены и приведены для справки.")}"
+            if (facts != null) "\n\n${L.t("ABOUT THIS STAR", "О ЗВЕЗДЕ")}\n${L.t("Class", "Класс")}: ${facts.kind}\n${L.t("Radius", "Радиус")}: ${facts.radius}\n${L.t("Mass", "Масса")}: ${facts.mass}\n${L.t("Distance from Earth", "Расстояние от Земли")}: ${facts.distanceLy}\n\n${L.t("DID YOU KNOW?", "ИНТЕРЕСНЫЙ ФАКТ")}: ${highlight ?: facts.note}\n${L.t("Values are rounded reference estimates.", "Значения округлены и приведены для справки.")}" + definition
             else "\n\n${L.t("ABOUT THIS STAR", "О ЗВЕЗДЕ")}\n${L.t("Approximate colour class", "Примерный спектральный класс по цвету")}: $colorClass\n${L.t("Color index B−V", "Индекс цвета B−V")}: %.2f\n".format(body.bv) +
-                (highlight?.let { "\n${L.t("DID YOU KNOW?", "ИНТЕРЕСНЫЙ ФАКТ")}: $it" } ?: L.t("The catalog has no reliable radius, mass or distance for this star yet.", "В каталоге пока нет надёжных данных о радиусе, массе и расстоянии этой звезды."))
+                (highlight?.let { "\n${L.t("DID YOU KNOW?", "ИНТЕРЕСНЫЙ ФАКТ")}: $it" } ?: L.t("The catalog has no reliable radius, mass or distance for this star yet.", "В каталоге пока нет надёжных данных о радиусе, массе и расстоянии этой звезды.")) + definition
         } else ""
         val physical = Catalog.bodyFacts[body.name]?.let { facts ->
             "\n\n${L.t("PHYSICAL DATA", "ФИЗИЧЕСКИЕ ДАННЫЕ")}" +
+                "\n\n${L.t("ABOUT THIS WORLD", "ОБ ЭТОМ МИРЕ")}: ${Catalog.bodyIntros[body.name]?.let { L.t(it.first, it.second) }.orEmpty()}" +
                 "\n${L.t("Mean radius", "Средний радиус")}: ${facts.radiusKm} km" +
                 "\n${L.t("Mass", "Масса")}: ${facts.massKg} kg" +
                 "\n${L.t("Surface gravity", "Ускорение свободного падения")}: ${facts.gravity}" +
@@ -838,6 +898,23 @@ class SkyView(ctx: Context) : View(ctx) {
             }
         }
         p.style = Paint.Style.FILL
+        var focusedConstellation: Pair<Con, Projected>? = null
+        var focusedStrength = 0f
+        for (con in Catalog.cons) {
+            val (ra, dec) = Astro.precess(con.ra, con.dec, jd)
+            val point = project(ra, dec) ?: continue
+            val strength = focusAlpha(point.x, point.y, f)
+            if (strength > focusedStrength) { focusedStrength = strength; focusedConstellation = con to point }
+        }
+        focusedConstellation?.let { (con, point) ->
+            if (focusedStrength > 0.2f) {
+                val normalized = con.en.replace('\u2005', ' ').lowercase()
+                when {
+                    normalized.contains("crab") -> drawConstellationArt(c, point, false, focusedStrength)
+                    normalized.contains("big dipper") || con.ru == "Большая Медведица" -> drawConstellationArt(c, point, true, focusedStrength)
+                }
+            }
+        }
         if (showConNames && day < 0.6f) {
             textPaint.textSize = 10.5f * dp; textPaint.color = withAlpha(0xFFA9C9EA.toInt(), 175); textPaint.textAlign = Paint.Align.CENTER
             for (k in Catalog.cons) { val (r, d) = Astro.precess(k.ra, k.dec, jd); val q = project(r, d) ?: continue
@@ -850,26 +927,73 @@ class SkyView(ctx: Context) : View(ctx) {
         }
     }
 
+    /** Soft illustrative line-art that appears only when the phone points at Cancer or the Big Dipper. */
+    private fun drawConstellationArt(c: Canvas, center: Projected, bear: Boolean, strength: Float) {
+        val save = c.save()
+        c.translate(center.x, center.y)
+        val scale = min(width, height) / if (bear) 780f else 700f
+        c.scale(scale, scale)
+        val alpha = (68 * strength).toInt().coerceIn(0, 68)
+        p.shader = null; p.style = Paint.Style.STROKE; p.strokeCap = Paint.Cap.ROUND; p.strokeJoin = Paint.Join.ROUND
+        p.strokeWidth = 3.2f; p.color = withAlpha(0xFF98B9E8.toInt(), alpha)
+        val outer = Path()
+        if (bear) {
+            outer.moveTo(-94f, 7f); outer.cubicTo(-82f, -44f, -45f, -64f, -8f, -52f)
+            outer.cubicTo(16f, -47f, 29f, -37f, 40f, -25f); outer.cubicTo(57f, -34f, 70f, -29f, 77f, -16f)
+            outer.cubicTo(93f, -15f, 99f, -3f, 88f, 8f); outer.cubicTo(75f, 16f, 65f, 5f, 71f, -6f)
+            outer.cubicTo(58f, -6f, 51f, 5f, 54f, 22f); outer.cubicTo(60f, 45f, 49f, 50f, 39f, 32f)
+            outer.cubicTo(31f, 20f, 22f, 19f, 13f, 30f); outer.cubicTo(9f, 52f, -4f, 54f, -8f, 33f)
+            outer.cubicTo(-11f, 19f, -25f, 14f, -37f, 27f); outer.cubicTo(-52f, 44f, -65f, 35f, -55f, 17f)
+            outer.cubicTo(-49f, 5f, -63f, -3f, -76f, 8f); outer.cubicTo(-83f, 15f, -91f, 14f, -94f, 7f)
+            outer.moveTo(-4f, -50f); outer.cubicTo(-22f, -83f, -9f, -100f, 6f, -83f)
+            outer.moveTo(5f, -50f); outer.cubicTo(26f, -82f, 43f, -71f, 26f, -42f)
+            outer.moveTo(-48f, -39f); outer.cubicTo(-61f, -69f, -44f, -76f, -31f, -48f)
+        } else {
+            outer.moveTo(-90f, -24f); outer.cubicTo(-73f, -55f, -39f, -59f, -23f, -36f)
+            outer.cubicTo(-12f, -22f, -11f, 15f, -24f, 33f); outer.cubicTo(-41f, 56f, -73f, 43f, -90f, 14f)
+            outer.cubicTo(-103f, -5f, -102f, -12f, -90f, -24f)
+            outer.moveTo(-85f, -24f); outer.cubicTo(-119f, -47f, -133f, -76f, -119f, -80f); outer.cubicTo(-103f, -84f, -94f, -55f, -77f, -32f)
+            outer.moveTo(-28f, -29f); outer.cubicTo(7f, -52f, 23f, -78f, 36f, -68f); outer.cubicTo(48f, -57f, 16f, -33f, -18f, -14f)
+            outer.moveTo(-33f, 30f); outer.cubicTo(-17f, 62f, -14f, 85f, 0f, 84f); outer.cubicTo(16f, 83f, 6f, 53f, -22f, 30f)
+            outer.moveTo(-81f, 19f); outer.cubicTo(-114f, 40f, -130f, 66f, -117f, 73f); outer.cubicTo(-102f, 80f, -82f, 49f, -68f, 30f)
+            outer.moveTo(-45f, 54f); outer.cubicTo(-50f, 82f, -47f, 104f, -34f, 105f); outer.cubicTo(-20f, 105f, -29f, 77f, -31f, 55f)
+        }
+        c.drawPath(outer, p)
+        p.strokeWidth = 1.4f; p.pathEffect = android.graphics.DashPathEffect(floatArrayOf(3f, 6f), 0f); p.color = withAlpha(0xFFB5D2FF.toInt(), alpha)
+        c.drawPath(outer, p); p.pathEffect = null; p.style = Paint.Style.FILL
+        c.restoreToCount(save)
+    }
+
     private fun drawTrace(c: Canvas, f: Float, jd: Double, bodies: List<Body>) {
         val name = selected ?: return
-        if (traceName != name || abs(jd - traceJd) > 0.03 || traceLat != lat || traceLon != lon || traceDecl != decl) {
-            val newTrace = ArrayList<DoubleArray>(289)
-            val newLabels = ArrayList<String?>(289)
+        val intervalMinutes = when {
+            fovDeg <= 5.5 -> 1
+            fovDeg <= 7.0 -> 2
+            fovDeg <= 12.0 -> 5
+            fovDeg <= 18.0 -> 10
+            fovDeg <= 25.0 -> 15
+            fovDeg <= 38.0 -> 30
+            else -> 60
+        }
+        if (traceName != name || abs(jd - traceJd) > 0.03 || traceLat != lat || traceLon != lon || traceDecl != decl || traceIntervalMinutes != intervalMinutes) {
+            val steps = 1440 / intervalMinutes
+            val newTrace = ArrayList<DoubleArray>(steps + 1)
+            val newLabels = ArrayList<String?>(steps + 1)
             val star = Astro.starByName(jd, name)
             // Stars repeat their apparent sky path after one sidereal day; solar-system
-            // objects use 24 hours. Five-minute samples keep the apparent sky path smooth.
-            val steps = 288
+            // objects use 24 hours. Sampling follows zoom so close views get minute marks.
             val spanDays = if (star != null) 0.9972695663 else 1.0
             for (k in 0..steps) {
                 val j = jd + spanDays * k / steps
                 val b = star ?: Astro.bodyAt(j, name) ?: return
                 val (alt, az) = Astro.altAz(b.ra, b.dec, lat, lon, j)
                 newTrace.add(doubleArrayOf(alt, az))
-                newLabels.add(if (k > 0 && k < steps && k % 72 == 0) timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong())) else null)
+                newLabels.add(if (k > 0 && k < steps && (k * intervalMinutes) % 60 == 0) timeFmt.format(java.util.Date(((j - 2440587.5) * 86400000).toLong())) else null)
             }
             trace.clear(); trace.addAll(newTrace)
             traceLabels.clear(); traceLabels.addAll(newLabels)
             traceName = name; traceJd = jd; traceLat = lat; traceLon = lon; traceDecl = decl
+            traceIntervalMinutes = intervalMinutes
         }
         tracePath.rewind()
         var prevOk = false
@@ -879,19 +1003,26 @@ class SkyView(ctx: Context) : View(ctx) {
             val point = projectAzAlt(t[1], t[0], f)
             if (point == null) { prevOk = false; continue }
             if (prevOk) tracePath.lineTo(point.x, point.y) else tracePath.moveTo(point.x, point.y)
-            // Hourly markers; label only every six hours. Leave the final sample
-            // unlabeled and undotted so it cannot duplicate the starting timestamp.
-            if (k > 0 && k < trace.lastIndex && k % 12 == 0) {
+            // Adaptive cadence follows zoom. Time labels stay hourly to remain readable.
+            // Leave the final sample unlabeled so it cannot repeat the starting time.
+            if (k > 0 && k < trace.lastIndex) {
                 val a = 230
                 p.style = Paint.Style.FILL; p.color = withAlpha(0xFF9BE7FF.toInt(), a)
-                c.drawCircle(point.x, point.y, 3.2f * dp, p)
+                c.drawCircle(point.x, point.y, if (intervalMinutes <= 5) 1.5f * dp else 2.5f * dp, p)
                 textPaint.textSize = 10f * dp; textPaint.color = withAlpha(0xFFD8F3FF.toInt(), a)
                 traceLabels[k]?.let { c.drawText(it, point.x + 6 * dp, point.y - 6 * dp, textPaint) }
+                if (k + 1 < trace.size) {
+                    val next = trace[k + 1]
+                    val ahead = projectAzAlt(next[1], next[0], f)
+                    if (ahead != null && hypot((ahead.x - point.x).toDouble(), (ahead.y - point.y).toDouble()) >= 7.0 * dp)
+                        drawOrbitArrow(c, point.x, point.y, ahead.x, ahead.y, a)
+                }
             }
             prevOk = true
         }
-        p.style = Paint.Style.STROKE; p.strokeWidth = 1.1f * dp; p.color = withAlpha(0xFF9BE7FF.toInt(), 155)
+        p.style = Paint.Style.STROKE; p.strokeWidth = 1.2f * dp; p.pathEffect = android.graphics.DashPathEffect(floatArrayOf(1.5f * dp, 5f * dp), 0f); p.color = withAlpha(0xFF9BE7FF.toInt(), 185)
         c.drawPath(tracePath, p); p.style = Paint.Style.FILL
+        p.pathEffect = null
 
         // The daily trace is cached for smooth rendering, but the five-minute forecast
         // is anchored to the actual current clock rather than the cache's old start time.
@@ -915,6 +1046,18 @@ class SkyView(ctx: Context) : View(ctx) {
                 textPaint.clearShadowLayer()
             }
         }
+    }
+
+    private fun drawOrbitArrow(c: Canvas, x1: Float, y1: Float, x2: Float, y2: Float, alpha: Int) {
+        val angle = atan2((y2 - y1).toDouble(), (x2 - x1).toDouble())
+        val size = 4.2 * dp
+        val arrow = Path().apply {
+            moveTo(x2, y2)
+            lineTo(x2 - (size * cos(angle - 0.55)).toFloat(), y2 - (size * sin(angle - 0.55)).toFloat())
+            lineTo(x2 - (size * cos(angle + 0.55)).toFloat(), y2 - (size * sin(angle + 0.55)).toFloat())
+            close()
+        }
+        p.style = Paint.Style.FILL; p.color = withAlpha(0xFFB9E8FF.toInt(), alpha); c.drawPath(arrow, p)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {

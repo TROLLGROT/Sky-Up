@@ -47,41 +47,16 @@ object Astro {
         return starByName(jd, name)
     }
 
-    /** Meeus-style truncated lunar theory (largest periodic terms), smooth over short tracks. */
+    /** Original short-track lunar series retained for the established chart path. */
     private fun moonAt(jd: Double): Body {
-        val T = (jd - 2451545.0) / 36525.0
-        val T2 = T * T; val T3 = T2 * T; val T4 = T3 * T
-        val lp = norm(218.3164477 + 481267.88123421 * T - 0.0015786 * T2 + T3 / 538841.0 - T4 / 65194000.0)
-        val Dm = norm(297.8501921 + 445267.1114034 * T - 0.0018819 * T2 + T3 / 545868.0 - T4 / 113065000.0) * D
-        val Ms = norm(357.5291092 + 35999.0502909 * T - 0.0001536 * T2 + T3 / 24490000.0) * D
-        val Mm = norm(134.9633964 + 477198.8675055 * T + 0.0087414 * T2 + T3 / 69699.0 - T4 / 14712000.0) * D
-        val F = norm(93.2720950 + 483202.0175233 * T - 0.0036539 * T2 - T3 / 3526000.0 + T4 / 863310000.0) * D
-        val E = 1.0 - 0.002516 * T - 0.0000074 * T2
-
-        val longitude = lp + (
-            6.288774 * sin(Mm) + 1.274027 * sin(2 * Dm - Mm) + 0.658314 * sin(2 * Dm) +
-            0.213618 * sin(2 * Mm) - 0.185116 * E * sin(Ms) - 0.114332 * sin(2 * F) +
-            0.058793 * sin(2 * Dm - 2 * Mm) + 0.057066 * E * sin(2 * Dm - Ms - Mm) +
-            0.053322 * sin(2 * Dm + Mm) + 0.045758 * E * sin(2 * Dm - Ms) -
-            0.040923 * E * sin(Ms - Mm) - 0.034720 * sin(Dm) -
-            0.030383 * E * sin(Ms + Mm) + 0.015327 * sin(2 * Dm - 2 * F) -
-            0.012528 * sin(Mm + 2 * F) - 0.010980 * sin(Mm - 2 * F)
-        ) * D
-        val latitude = (
-            5.128122 * sin(F) + 0.280602 * sin(Mm + F) + 0.277693 * sin(Mm - F) +
-            0.173237 * sin(2 * Dm - F) + 0.055413 * sin(2 * Dm - Mm + F) +
-            0.046271 * sin(2 * Dm - Mm - F) + 0.032573 * sin(2 * Dm + F) +
-            0.017198 * sin(2 * Mm + F) + 0.009267 * sin(2 * Dm + Mm - F) +
-            0.008823 * sin(2 * Mm - F) + 0.008247 * E * sin(2 * Dm - Ms - Mm + F) +
-            0.004323 * sin(2 * Dm - F - Ms)
-        ) * D
-        val lon = longitude
-        val lat = latitude
-        // The lunar longitude/latitude above are already referred to the date's
-        // mean equinox. Convert with the date's obliquity and do not precess again.
-        val (ra, dec) = eclToEq(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat), 23.4393 - 0.0000004 * (jd - 2451545.0))
-        val distance = 385000.56 - 20905.355 * cos(Mm) - 3699.111 * cos(2 * Dm - Mm) -
-            2955.968 * cos(2 * Dm) - 569.925 * cos(2 * Mm) + 48.888 * cos(Ms) - 3.149 * cos(2 * F)
+        val d = jd - 2451545.0
+        val meanLongitude = 218.316 + 13.176396 * d
+        val anomaly = (134.963 + 13.064993 * d) * D
+        val latitudeArgument = (93.272 + 13.229350 * d) * D
+        val longitude = (meanLongitude + 6.289 * sin(anomaly)) * D
+        val latitude = 5.128 * sin(latitudeArgument) * D
+        val (ra, dec) = eclToEq(cos(latitude) * cos(longitude), cos(latitude) * sin(longitude), sin(latitude), 23.4393 - 0.0000004 * d)
+        val distance = 385001.0 - 20905.0 * cos(anomaly)
         return Body("Moon", "Natural satellite", ra, dec, -10.0, "Distance %,d km".format(distance.roundToInt()))
     }
 

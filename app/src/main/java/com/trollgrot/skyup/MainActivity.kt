@@ -46,6 +46,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var nasaArt: ImageView
     private lateinit var nasaCaption: TextView
     private var nasaRequestId = 0
+    private var wikipediaRequestId = 0
+    private var detailBaseText = ""
     private val nasaImageCache = LinkedHashMap<String, Bitmap>()
     private val nasaImageCredits = HashMap<String, String>()
     private lateinit var sm: SensorManager
@@ -95,6 +97,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         night = nightAt(prefs.getFloat("lat", 0f).toDouble(), prefs.getFloat("lon", 0f).toDouble(), prefs.contains("lat"))
         Catalog.load(this)
+        prefetchSolarWikiLeads()
         Astro.stars(Astro.jd(System.currentTimeMillis()))
         sky = SkyView(this).apply {
             showConstellations = prefs.getBoolean("cons", true); showConNames = prefs.getBoolean("conNames", true)
@@ -112,17 +115,27 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         info = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 14f
+            autoLinkMask = android.text.util.Linkify.WEB_URLS
+            movementMethod = android.text.method.LinkMovementMethod.getInstance()
             setLineSpacing(dp(3).toFloat(), 1f)
             setPadding(dp(16), dp(12), dp(16), dp(12))
             setPadding(dp(20), dp(12), dp(20), dp(24))
         }
         sky.onSelect = { message ->
             detailSheet.visibility = if (message == null) View.GONE else View.VISIBLE
-            if (message != null) { info.text = message; starArt.tag = message; starArt.invalidate() }
+            if (message != null) {
+                detailBaseText = message
+                info.text = detailBaseText
+                starArt.tag = message; starArt.invalidate()
+                loadWikipediaIntro(message)
+            }
             loadNasaImage(message)
         }
         detailSheet = makeDetailSheet()
         detailSheet.visibility = View.GONE
+        sky.onRequestBodyPhoto = { name ->
+            if (detailSheet.visibility == View.GONE) loadNasaImage("$name · ${L.t("Planet", "Планета")}")
+        }
         root.addView(detailSheet, FrameLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.76f).toInt(), Gravity.BOTTOM).apply {
             setMargins(dp(8), 0, dp(8), dp(8))
         })
@@ -469,28 +482,50 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         nasaArt.visibility = View.GONE
         nasaCaption.visibility = View.GONE
         if (message == null) return
-        val displayed = message.substringBefore('\n').substringBefore('·').trim()
-        val names = listOf("Sun", "Moon", "Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune") + Catalog.ru.keys
-        val objectName = names.firstOrNull { L.name(it) == displayed } ?: displayed
+        val objectName = canonicalObjectName(message)
         nasaImageCache[objectName]?.let { bitmap ->
             nasaArt.setImageBitmap(bitmap)
             nasaArt.visibility = View.VISIBLE
+            if (objectName in SOLAR_BODY_NAMES) sky.setBodyPhoto(objectName, bitmap)
             nasaCaption.text = "${nasaImageCredits[objectName] ?: "NASA"} · ${L.t("archive image", "снимок из архива")}: $objectName"
             nasaCaption.visibility = View.VISIBLE
             return
         }
+        if (objectName !in SOLAR_BODY_NAMES) return
         Thread({
             var bitmap: Bitmap? = null
             var title = objectName
             var credit = "NASA"
             try {
-                val encoded = URLEncoder.encode(objectName, "UTF-8")
-                val search = URL("https://images-api.nasa.gov/search?q=$encoded&media_type=image&page_size=1").openConnection() as HttpURLConnection
+                val query = when (objectName) {
+                    "Sun" -> "Sun solar observatory full disk NASA"
+                    "Moon" -> "Moon full disk spacecraft NASA"
+                    "Mars" -> "Mars planet full disk spacecraft NASA"
+                    else -> "$objectName planet spacecraft NASA"
+                }
+                val encoded = URLEncoder.encode(query, "UTF-8")
+                val search = URL("https://images-api.nasa.gov/search?q=$encoded&media_type=image&page_size=20").openConnection() as HttpURLConnection
                 search.connectTimeout = 4500; search.readTimeout = 6500
                 val result = try { search.inputStream.bufferedReader().use { JSONObject(it.readText()) } } finally { search.disconnect() }
                 val items = result.optJSONObject("collection")?.optJSONArray("items")
                 if (items != null && items.length() > 0) {
-                    val item = items.optJSONObject(0)
+                    var bestItem: org.json.JSONObject? = null
+                    var bestScore = Int.MIN_VALUE
+                    for (i in 0 until items.length()) {
+                        val candidate = items.optJSONObject(i) ?: continue
+                        val metadata = candidate.optJSONArray("data")?.optJSONObject(0) ?: continue
+                        val candidateTitle = metadata.optString("title", "").lowercase()
+                        val description = metadata.optString("description", "").lowercase()
+                        val queryText = "$candidateTitle $description"
+                        val aliases = when (objectName) { "Moon" -> listOf("moon", "lunar"); "Earth" -> listOf("earth", "blue marble"); else -> listOf(objectName.lowercase()) }
+                        if (aliases.none { candidateTitle.contains(it) }) continue
+                        var score = 30
+                        if (candidateTitle.contains(objectName.lowercase())) score += 10
+                        if (listOf("full disk", "whole disk", "global", "planet", "observed", "spacecraft").any { candidateTitle.contains(it) }) score += 5
+                        if (listOf("illustration", "artist concept", "artist's concept", "painting", "diagram", "map of", "rover", "astronaut", "child", "boy").any { queryText.contains(it) }) score -= 50
+                        if (score > bestScore) { bestScore = score; bestItem = candidate }
+                    }
+                    val item = bestItem
                     val metadata = item?.optJSONArray("data")?.optJSONObject(0)
                     title = metadata?.optString("title", objectName) ?: objectName
                     credit = metadata?.optString("center", "NASA") ?: "NASA"
@@ -514,6 +549,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 if (nasaImageCache.size >= 8) nasaImageCache.remove(nasaImageCache.keys.first())
                 nasaImageCache[objectName] = loaded
                 nasaImageCredits[objectName] = loadedCredit
+                if (objectName in SOLAR_BODY_NAMES) sky.setBodyPhoto(objectName, loaded)
                 nasaArt.setImageBitmap(loaded)
                 nasaArt.contentDescription = title
                 nasaArt.visibility = View.VISIBLE
@@ -521,6 +557,83 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 nasaCaption.visibility = View.VISIBLE
             }
         }, "nasa-image-preview").apply { isDaemon = true; start() }
+    }
+
+    private fun canonicalObjectName(message: String): String {
+        val displayed = message.substringBefore('\n').substringBefore('·').trim()
+        val names = SOLAR_BODY_NAMES + Catalog.ru.keys
+        return names.firstOrNull { L.name(it) == displayed } ?: displayed
+    }
+
+    /** Fetch up to four lead paragraphs and retain them on-device for offline reading. */
+    private fun loadWikipediaIntro(message: String) {
+        val requestId = ++wikipediaRequestId
+        val objectName = canonicalObjectName(message)
+        val language = if (L.ru) "ru" else "en"
+        val articleTitle = L.name(objectName)
+        val cacheKey = "lead_${language}_${objectName}"
+        val cache = getSharedPreferences("wikipedia_cache", MODE_PRIVATE)
+        fun showLead(extract: String, sourceLanguage: String = language, sourceTitle: String = articleTitle) {
+            if (requestId != wikipediaRequestId || detailBaseText.isBlank()) return
+            val source = "https://$sourceLanguage.wikipedia.org/wiki/${URLEncoder.encode(sourceTitle.replace(' ', '_'), "UTF-8")}"
+            info.text = "$detailBaseText\n\n${L.t("FROM WIKIPEDIA", "ИЗ ВИКИПЕДИИ")}\n$extract\n\n$source\n${L.t("Wikipedia text · CC BY-SA 4.0", "Текст Википедии · CC BY-SA 4.0")}: https://creativecommons.org/licenses/by-sa/4.0/"
+        }
+        cache.getString(cacheKey, null)?.let {
+            val sourceLanguage = cache.getString("${cacheKey}_source", language) ?: language
+            showLead(it, sourceLanguage, if (sourceLanguage == language) articleTitle else objectName)
+            return
+        }
+        Thread({
+            try {
+                var sourceLanguage = language
+                var sourceTitle = articleTitle
+                var extract = fetchWikipediaLead(language, articleTitle).orEmpty()
+                if (extract.length < 40 && language != "en") {
+                    sourceLanguage = "en"; sourceTitle = objectName
+                    extract = fetchWikipediaLead(sourceLanguage, sourceTitle).orEmpty()
+                }
+                val lead = extract
+                if (lead.length < 40) return@Thread
+                cache.edit().putString(cacheKey, lead).putString("${cacheKey}_source", sourceLanguage).apply()
+                runOnUiThread { if (!isFinishing) showLead(lead, sourceLanguage, sourceTitle) }
+            } catch (_: Exception) { /* The offline reference text remains available. */ }
+        }, "wikipedia-lead").apply { isDaemon = true; start() }
+    }
+
+    private fun prefetchSolarWikiLeads() {
+        val language = if (L.ru) "ru" else "en"
+        val cache = getSharedPreferences("wikipedia_cache", MODE_PRIVATE)
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            for (name in SOLAR_BODY_NAMES) {
+                val key = "lead_${language}_${name}"
+                if (cache.contains(key)) continue
+                try {
+                    var sourceLanguage = language
+                    var title = L.name(name)
+                    var lead = fetchWikipediaLead(sourceLanguage, title).orEmpty()
+                    if (lead.length < 40 && language != "en") {
+                        sourceLanguage = "en"; title = name
+                        lead = fetchWikipediaLead(sourceLanguage, title).orEmpty()
+                    }
+                    if (lead.length >= 40) cache.edit().putString(key, lead).putString("${key}_source", sourceLanguage).apply()
+                } catch (_: Exception) { /* Offline summaries are bundled in the app. */ }
+            }
+        }, "wikipedia-offline-prefetch").apply { isDaemon = true; start() }
+    }
+
+    private fun fetchWikipediaLead(language: String, title: String): String? {
+        val encoded = URLEncoder.encode(title.replace(' ', '_'), "UTF-8")
+        val url = URL("https://$language.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&exsentences=10&redirects=1&format=json&titles=$encoded")
+        val connection = url.openConnection() as HttpURLConnection
+        connection.connectTimeout = 4500; connection.readTimeout = 6500
+        val response = try { connection.inputStream.bufferedReader().use { JSONObject(it.readText()) } } finally { connection.disconnect() }
+        val pages = response.optJSONObject("query")?.optJSONObject("pages") ?: return null
+        val iterator = pages.keys()
+        if (!iterator.hasNext()) return null
+        val extract = pages.optJSONObject(iterator.next())?.optString("extract", "").orEmpty()
+        val paragraphs = extract.split(Regex("\\n\\s*\\n")).map { it.trim() }.filter { it.length > 24 }.take(4)
+        return paragraphs.joinToString("\n\n").take(5200).takeIf { it.length >= 40 }
     }
 
     private fun makeTopBar(): View {
@@ -752,7 +865,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         visual.addView(starArt, FrameLayout.LayoutParams(-1, -1))
         nasaArt = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
+            scaleType = ImageView.ScaleType.FIT_CENTER
             visibility = View.GONE
         }
         visual.addView(nasaArt, FrameLayout.LayoutParams(-1, -1))
@@ -973,6 +1086,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
     companion object {
+        private val SOLAR_BODY_NAMES = setOf("Sun", "Moon", "Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune")
         private const val LOCATION_PERMISSION_REQUEST = 41
         private const val SENSOR_PERIOD_US = 16_667
     }
