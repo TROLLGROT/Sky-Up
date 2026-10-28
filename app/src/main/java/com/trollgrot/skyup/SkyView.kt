@@ -90,7 +90,7 @@ class SkyView(ctx: Context) : View(ctx) {
         val jd = Astro.jd(now())
         val (alt, az) = Astro.altAz(ra, dec, lat, lon, jd)
         val a = Math.toRadians(az - decl); val e = Math.toRadians(alt)
-        val wx = cos(e) * sin(a); val wy = cos(e) * cos(a); val wz = sin(e)
+        val wx = (cos(e) * sin(a)).toFloat(); val wy = (cos(e) * cos(a)).toFloat(); val wz = sin(e).toFloat()
         val current = if (manualMode) manualRot else FloatArray(9).also { multiply(gyroOffset, rot, it) }
         val vx = current[0] * wx + current[3] * wy + current[6] * wz
         val vy = current[1] * wx + current[4] * wy + current[7] * wz
@@ -100,7 +100,7 @@ class SkyView(ctx: Context) : View(ctx) {
         var angle = acos(vz.toDouble()).toFloat()
         if (norm < 1e-6f) { if (vz > 0f) return; ax = 0f; ay = 1f; norm = 1f }
         ax /= norm; ay /= norm
-        val c = cos(angle); val sn = sin(angle); val t = 1f - c
+        val c = cos(angle.toDouble()).toFloat(); val sn = sin(angle.toDouble()).toFloat(); val t = 1f - c
         val q = floatArrayOf(
             t*ax*ax+c, t*ax*ay+sn*az0, t*ax*az0-sn*ay,
             t*ax*ay-sn*az0, t*ay*ay+c, t*ay*az0+sn*ax,

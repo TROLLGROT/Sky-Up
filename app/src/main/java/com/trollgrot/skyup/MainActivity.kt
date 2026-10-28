@@ -508,7 +508,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(8), dp(18), dp(8)) }
         val query = android.widget.EditText(this).apply {
             hint = L.t("Star, planet or constellation", "Звезда, планета или созвездие")
-            singleLine = true
+            setSingleLine(true)
             setTextColor(Color.WHITE); setHintTextColor(0xFF91A4BC.toInt())
         }
         val list = android.widget.ListView(this)
