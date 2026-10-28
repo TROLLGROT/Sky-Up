@@ -53,6 +53,8 @@ object Catalog {
         "Uranus" to ("Uranus is an ice giant with a blue-green atmosphere containing methane. Its rotation axis is tilted almost on its side, giving the planet unusually extreme seasons; it also has faint rings and many moons." to "Уран — ледяной гигант с голубовато-зелёной атмосферой, содержащей метан. Ось его вращения наклонена почти набок, поэтому сезоны необычны; у планеты также есть тусклые кольца и спутники."),
         "Neptune" to ("Neptune is a distant ice giant with a deep blue atmosphere and very fast winds. It was the first planet whose existence was predicted mathematically before it was observed through a telescope." to "Нептун — далёкий ледяной гигант с насыщенно-синей атмосферой и очень быстрыми ветрами. Его существование сначала предсказали математически, а уже затем обнаружили в телескоп.")
     )
+    const val starDefinitionMarker = "[[STAR_WIKI_OR_DEFINITION]]"
+    fun starDefinitionBlock(ru: Boolean): String = "\n\n$starDefinitionMarker\n${if (ru) "ЧТО ТАКОЕ ЗВЕЗДА?" else "WHAT IS A STAR?"}\n${if (ru) starDefinitionRu else starDefinitionEn}"
     const val starDefinitionEn = "A star is a luminous ball of hot plasma held together by its own gravity. Most stars generate energy by nuclear fusion in their cores."
     const val starDefinitionRu = "Звезда — светящийся шар горячей плазмы, удерживаемый собственной гравитацией. Большинство звёзд производит энергию термоядерным синтезом в ядре."
     val starFacts = mapOf(

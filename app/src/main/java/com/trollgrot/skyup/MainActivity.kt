@@ -61,6 +61,10 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
     private lateinit var controlModeButton: Button
 
     private val q = FloatArray(4)
+    private val smoothQ = FloatArray(4)
+    private val sensorQuaternion = FloatArray(4)
+    private var hasSmoothQuaternion = false
+    private var lastOrientationTimestamp = 0L
     private val calibrationPreviousQ = FloatArray(4)
     private val calibrationAngles = FloatArray(3)
     private var calibrationActive = false
@@ -115,8 +119,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         info = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 14f
-            autoLinkMask = android.text.util.Linkify.WEB_URLS
-            movementMethod = android.text.method.LinkMovementMethod.getInstance()
             setLineSpacing(dp(3).toFloat(), 1f)
             setPadding(dp(16), dp(12), dp(16), dp(12))
             setPadding(dp(20), dp(12), dp(20), dp(24))
@@ -133,9 +135,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         detailSheet = makeDetailSheet()
         detailSheet.visibility = View.GONE
-        sky.onRequestBodyPhoto = { name ->
-            if (detailSheet.visibility == View.GONE) loadNasaImage("$name · ${L.t("Planet", "Планета")}")
-        }
         root.addView(detailSheet, FrameLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.76f).toInt(), Gravity.BOTTOM).apply {
             setMargins(dp(8), 0, dp(8), dp(8))
         })
@@ -247,13 +246,47 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR &&
             event.sensor.type != Sensor.TYPE_GAME_ROTATION_VECTOR) return
         SensorManager.getQuaternionFromVector(q, event.values)
-        SensorManager.getRotationMatrixFromVector(rot, event.values)
+        smoothOrientation(q, event.timestamp)
+        // getQuaternionFromVector returns w,x,y,z; the rotation-vector API expects x,y,z,w.
+        sensorQuaternion[0] = smoothQ[1]; sensorQuaternion[1] = smoothQ[2]
+        sensorQuaternion[2] = smoothQ[3]; sensorQuaternion[3] = smoothQ[0]
+        SensorManager.getRotationMatrixFromVector(rot, sensorQuaternion)
         rot.copyInto(rg)
         trackCalibration(q)
         // Publish an immutable snapshot; SkyView reads it while rendering on the UI thread.
         sky.rot = rot.copyOf()
         // Let Android schedule one redraw at the next display vsync.
         sky.requestFrame()
+    }
+
+
+    /** Adaptive quaternion low-pass filter: damp tiny hand tremor, follow intentional turns quickly. */
+    private fun smoothOrientation(raw: FloatArray, timestamp: Long) {
+        if (!hasSmoothQuaternion) {
+            raw.copyInto(smoothQ); hasSmoothQuaternion = true; lastOrientationTimestamp = timestamp; return
+        }
+        val dt = ((timestamp - lastOrientationTimestamp).coerceAtLeast(1L) / 1_000_000_000.0).coerceIn(0.001, 0.1)
+        lastOrientationTimestamp = timestamp
+        var dot = 0.0
+        for (i in 0..3) dot += smoothQ[i] * raw[i]
+        val sign = if (dot < 0.0) -1f else 1f
+        dot = kotlin.math.abs(dot).coerceIn(0.0, 1.0)
+        val angle = 2.0 * acos(dot)
+        val speed = angle / dt
+        val tau = when { speed < 1.0 -> 0.11; speed < 3.0 -> 0.065; else -> 0.028 }
+        val alpha = (1.0 - kotlin.math.exp(-dt / tau)).toFloat().coerceIn(0f, 1f)
+        if (dot > 0.9995) {
+            var norm = 0.0
+            for (i in 0..3) { smoothQ[i] += alpha * (raw[i] * sign - smoothQ[i]); norm += smoothQ[i] * smoothQ[i] }
+            val inv = (1.0 / kotlin.math.sqrt(norm)).toFloat()
+            for (i in 0..3) smoothQ[i] *= inv
+        } else {
+            val theta = acos(dot)
+            val sinTheta = kotlin.math.sin(theta)
+            val a = (kotlin.math.sin((1.0 - alpha) * theta) / sinTheta).toFloat()
+            val b = (kotlin.math.sin(alpha * theta) / sinTheta).toFloat() * sign
+            for (i in 0..3) smoothQ[i] = a * smoothQ[i] + b * raw[i]
+        }
     }
 
     private fun nightAt(la: Double, lo: Double, has: Boolean): Boolean {
@@ -472,8 +505,37 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     private fun showSearch() {
         val names = (listOf("Sun", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune") + Catalog.named).distinct()
-        android.app.AlertDialog.Builder(this).setTitle(L.t("Find object", "Найти объект"))
-            .setItems(names.map { L.name(it) }.toTypedArray()) { _, i -> sky.select(names[i]) }.show()
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(8), dp(18), dp(8)) }
+        val query = android.widget.EditText(this).apply {
+            hint = L.t("Star, planet or constellation", "Звезда, планета или созвездие")
+            singleLine = true
+            setTextColor(Color.WHITE); setHintTextColor(0xFF91A4BC.toInt())
+        }
+        val list = android.widget.ListView(this)
+        val adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_list_item_1, names.map { L.name(it) })
+        list.adapter = adapter
+        container.addView(query, LinearLayout.LayoutParams(-1, dp(52)))
+        container.addView(list, LinearLayout.LayoutParams(-1, dp(360)))
+        val dialog = android.app.AlertDialog.Builder(this).setTitle(L.t("Find object", "Найти объект"))
+            .setView(container).create()
+        list.setOnItemClickListener { _, _, position, _ ->
+            val shown = adapter.getItem(position).toString()
+            val name = names.first { L.name(it) == shown }
+            dialog.dismiss()
+            sky.select(name)
+        }
+        query.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                val needle = s?.toString()?.trim().orEmpty()
+                adapter.clear()
+                names.filter { needle.isEmpty() || L.name(it).contains(needle, true) || it.contains(needle, true) }
+                    .forEach { adapter.add(L.name(it)) }
+                adapter.notifyDataSetChanged()
+            }
+            override fun afterTextChanged(s: android.text.Editable?) = Unit
+        })
+        dialog.show()
     }
 
     /** Load one NASA Library preview off the UI thread; the local sphere stays as the offline fallback. */
@@ -486,7 +548,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         nasaImageCache[objectName]?.let { bitmap ->
             nasaArt.setImageBitmap(bitmap)
             nasaArt.visibility = View.VISIBLE
-            if (objectName in SOLAR_BODY_NAMES) sky.setBodyPhoto(objectName, bitmap)
             nasaCaption.text = "${nasaImageCredits[objectName] ?: "NASA"} · ${L.t("archive image", "снимок из архива")}: $objectName"
             nasaCaption.visibility = View.VISIBLE
             return
@@ -549,7 +610,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 if (nasaImageCache.size >= 8) nasaImageCache.remove(nasaImageCache.keys.first())
                 nasaImageCache[objectName] = loaded
                 nasaImageCredits[objectName] = loadedCredit
-                if (objectName in SOLAR_BODY_NAMES) sky.setBodyPhoto(objectName, loaded)
                 nasaArt.setImageBitmap(loaded)
                 nasaArt.contentDescription = title
                 nasaArt.visibility = View.VISIBLE
@@ -573,14 +633,17 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val articleTitle = L.name(objectName)
         val cacheKey = "lead_${language}_${objectName}"
         val cache = getSharedPreferences("wikipedia_cache", MODE_PRIVATE)
-        fun showLead(extract: String, sourceLanguage: String = language, sourceTitle: String = articleTitle) {
+        fun showLead(extract: String) {
             if (requestId != wikipediaRequestId || detailBaseText.isBlank()) return
-            val source = "https://$sourceLanguage.wikipedia.org/wiki/${URLEncoder.encode(sourceTitle.replace(' ', '_'), "UTF-8")}"
-            info.text = "$detailBaseText\n\n${L.t("FROM WIKIPEDIA", "ИЗ ВИКИПЕДИИ")}\n$extract\n\n$source\n${L.t("Wikipedia text · CC BY-SA 4.0", "Текст Википедии · CC BY-SA 4.0")}: https://creativecommons.org/licenses/by-sa/4.0/"
+            val definition = Catalog.starDefinitionBlock(L.ru)
+            info.text = if (detailBaseText.contains(Catalog.starDefinitionMarker)) {
+                detailBaseText.replace(definition, "\n\n$extract")
+            } else {
+                "$detailBaseText\n\n$extract"
+            }
         }
         cache.getString(cacheKey, null)?.let {
-            val sourceLanguage = cache.getString("${cacheKey}_source", language) ?: language
-            showLead(it, sourceLanguage, if (sourceLanguage == language) articleTitle else objectName)
+            showLead(it)
             return
         }
         Thread({
@@ -595,7 +658,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                 val lead = extract
                 if (lead.length < 40) return@Thread
                 cache.edit().putString(cacheKey, lead).putString("${cacheKey}_source", sourceLanguage).apply()
-                runOnUiThread { if (!isFinishing) showLead(lead, sourceLanguage, sourceTitle) }
+                runOnUiThread { if (!isFinishing) showLead(lead) }
             } catch (_: Exception) { /* The offline reference text remains available. */ }
         }, "wikipedia-lead").apply { isDaemon = true; start() }
     }
