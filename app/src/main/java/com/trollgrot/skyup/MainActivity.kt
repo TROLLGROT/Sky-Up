@@ -179,9 +179,8 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
 
     override fun onResume() {
         super.onResume()
-        // Android's fused rotation vector already combines gyro, accelerometer and
-        // magnetic heading. Avoid layering a second quaternion filter and custom yaw
-        // correction over it: that adds latency and can produce visible compass jumps.
+        // Android's fused vector supplies the absolute orientation; a light adaptive
+        // filter in onSensorChanged only damps hand tremor while preserving quick turns.
         val orientation = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
             ?: sm.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
         orientation?.let { sm.registerListener(this, it, SENSOR_PERIOD_US) }
@@ -558,34 +557,51 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
             var title = objectName
             var credit = "NASA"
             try {
-                val query = when (objectName) {
-                    "Sun" -> "Sun solar observatory full disk NASA"
-                    "Moon" -> "Moon full disk spacecraft NASA"
-                    "Mars" -> "Mars planet full disk spacecraft NASA"
-                    else -> "$objectName planet spacecraft NASA"
+                val queries = when (objectName) {
+                    "Sun" -> listOf("Sun solar dynamics observatory full disk NASA", "NASA SDO Sun close up")
+                    "Moon" -> listOf("Moon full disk spacecraft NASA", "NASA lunar globe full moon")
+                    "Mars" -> listOf("Mars planet full disk spacecraft NASA", "NASA Mars global color mosaic")
+                    "Mercury" -> listOf("Mercury planet spacecraft NASA full disk", "NASA Mercury global mosaic")
+                    "Venus" -> listOf("Venus planet spacecraft NASA full disk", "NASA Venus global radar image")
+                    "Earth" -> listOf("Earth blue marble full disk NASA", "NASA Earth full globe satellite")
+                    else -> listOf("$objectName planet NASA spacecraft", "NASA $objectName global color mosaic")
                 }
-                val encoded = URLEncoder.encode(query, "UTF-8")
-                val search = URL("https://images-api.nasa.gov/search?q=$encoded&media_type=image&page_size=20").openConnection() as HttpURLConnection
-                search.connectTimeout = 4500; search.readTimeout = 6500
-                val result = try { search.inputStream.bufferedReader().use { JSONObject(it.readText()) } } finally { search.disconnect() }
-                val items = result.optJSONObject("collection")?.optJSONArray("items")
-                if (items != null && items.length() > 0) {
-                    var bestItem: org.json.JSONObject? = null
-                    var bestScore = Int.MIN_VALUE
+                var bestItem: org.json.JSONObject? = null
+                var bestScore = Int.MIN_VALUE
+                val aliases = when (objectName) {
+                    "Moon" -> listOf("moon", "lunar")
+                    "Earth" -> listOf("earth", "blue marble")
+                    else -> listOf(objectName.lowercase())
+                }
+                for (query in queries) {
+                    val encoded = URLEncoder.encode(query, "UTF-8")
+                    val search = URL("https://images-api.nasa.gov/search?q=$encoded&media_type=image&page_size=30").openConnection() as HttpURLConnection
+                    search.connectTimeout = 4500; search.readTimeout = 6500
+                    val result = try {
+                        search.inputStream.bufferedReader().use { JSONObject(it.readText()) }
+                    } catch (_: Exception) {
+                        continue
+                    } finally { search.disconnect() }
+                    val items = result.optJSONObject("collection")?.optJSONArray("items") ?: continue
                     for (i in 0 until items.length()) {
                         val candidate = items.optJSONObject(i) ?: continue
                         val metadata = candidate.optJSONArray("data")?.optJSONObject(0) ?: continue
                         val candidateTitle = metadata.optString("title", "").lowercase()
                         val description = metadata.optString("description", "").lowercase()
-                        val queryText = "$candidateTitle $description"
-                        val aliases = when (objectName) { "Moon" -> listOf("moon", "lunar"); "Earth" -> listOf("earth", "blue marble"); else -> listOf(objectName.lowercase()) }
-                        if (aliases.none { candidateTitle.contains(it) }) continue
-                        var score = 30
-                        if (candidateTitle.contains(objectName.lowercase())) score += 10
-                        if (listOf("full disk", "whole disk", "global", "planet", "observed", "spacecraft").any { candidateTitle.contains(it) }) score += 5
-                        if (listOf("illustration", "artist concept", "artist's concept", "painting", "diagram", "map of", "rover", "astronaut", "child", "boy").any { queryText.contains(it) }) score -= 50
+                        val keywords = metadata.optJSONArray("keywords")?.let { array ->
+                            (0 until array.length()).joinToString(" ") { array.optString(it) }.lowercase()
+                        }.orEmpty()
+                        val allText = "$candidateTitle $description $keywords"
+                        if (aliases.none { allText.contains(it) }) continue
+                        val exclusions = listOf("artist concept", "artist's concept", "illustration", "painting", "diagram", "map of", "rover", "astronaut", "child", "boy", "model of")
+                        var score = 25
+                        if (aliases.any { candidateTitle.contains(it) }) score += 24
+                        if (candidateTitle.contains(objectName.lowercase())) score += 12
+                        if (listOf("full disk", "whole disk", "global", "planet", "spacecraft", "observatory", "mosaic", "globe").any { allText.contains(it) }) score += 8
+                        if (exclusions.any { allText.contains(it) }) score -= 60
                         if (score > bestScore) { bestScore = score; bestItem = candidate }
                     }
+                }
                     val item = bestItem
                     val metadata = item?.optJSONArray("data")?.optJSONObject(0)
                     title = metadata?.optString("title", objectName) ?: objectName
@@ -601,7 +617,6 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
                         image.connectTimeout = 4500; image.readTimeout = 6500
                         bitmap = try { image.inputStream.use { BitmapFactory.decodeStream(it) } } finally { image.disconnect() }
                     }
-                }
             } catch (_: Exception) { /* Keep the generated, offline model visible. */ }
             val loaded = bitmap
             val loadedCredit = credit
@@ -631,7 +646,7 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         val objectName = canonicalObjectName(message)
         val language = if (L.ru) "ru" else "en"
         val articleTitle = L.name(objectName)
-        val cacheKey = "lead_${language}_${objectName}"
+        val cacheKey = "lead_v2_${language}_${objectName}"
         val cache = getSharedPreferences("wikipedia_cache", MODE_PRIVATE)
         fun showLead(extract: String) {
             if (requestId != wikipediaRequestId || detailBaseText.isBlank()) return
@@ -648,16 +663,9 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         }
         Thread({
             try {
-                var sourceLanguage = language
-                var sourceTitle = articleTitle
-                var extract = fetchWikipediaLead(language, articleTitle).orEmpty()
-                if (extract.length < 40 && language != "en") {
-                    sourceLanguage = "en"; sourceTitle = objectName
-                    extract = fetchWikipediaLead(sourceLanguage, sourceTitle).orEmpty()
-                }
-                val lead = extract
+                val lead = fetchWikipediaLead(language, articleTitle).orEmpty()
                 if (lead.length < 40) return@Thread
-                cache.edit().putString(cacheKey, lead).putString("${cacheKey}_source", sourceLanguage).apply()
+                cache.edit().putString(cacheKey, lead).apply()
                 runOnUiThread { if (!isFinishing) showLead(lead) }
             } catch (_: Exception) { /* The offline reference text remains available. */ }
         }, "wikipedia-lead").apply { isDaemon = true; start() }
@@ -669,17 +677,12 @@ class MainActivity : Activity(), SensorEventListener, LocationListener {
         Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
             for (name in SOLAR_BODY_NAMES) {
-                val key = "lead_${language}_${name}"
+                val key = "lead_v2_${language}_${name}"
                 if (cache.contains(key)) continue
                 try {
-                    var sourceLanguage = language
-                    var title = L.name(name)
-                    var lead = fetchWikipediaLead(sourceLanguage, title).orEmpty()
-                    if (lead.length < 40 && language != "en") {
-                        sourceLanguage = "en"; title = name
-                        lead = fetchWikipediaLead(sourceLanguage, title).orEmpty()
-                    }
-                    if (lead.length >= 40) cache.edit().putString(key, lead).putString("${key}_source", sourceLanguage).apply()
+                    val title = L.name(name)
+                    val lead = fetchWikipediaLead(language, title).orEmpty()
+                    if (lead.length >= 40) cache.edit().putString(key, lead).apply()
                 } catch (_: Exception) { /* Offline summaries are bundled in the app. */ }
             }
         }, "wikipedia-offline-prefetch").apply { isDaemon = true; start() }

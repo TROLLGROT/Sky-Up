@@ -133,8 +133,12 @@ class SkyView(ctx: Context) : View(ctx) {
         if (manualMode) {
             multiply(gyroOffset, rot, manualRot)
         } else {
-            val inverse = floatArrayOf(rot[0], rot[3], rot[6], rot[1], rot[4], rot[7], rot[2], rot[5], rot[8])
-            multiply(manualRot, inverse, gyroOffset)
+            // Gyro mode always follows the phone's live orientation. Do not invert or
+            // preserve the manual/search offset here: that compounded correction and
+            // made later sensor updates appear to spin the sky in the wrong direction.
+            gyroOffset[0] = 1f; gyroOffset[1] = 0f; gyroOffset[2] = 0f
+            gyroOffset[3] = 0f; gyroOffset[4] = 1f; gyroOffset[5] = 0f
+            gyroOffset[6] = 0f; gyroOffset[7] = 0f; gyroOffset[8] = 1f
         }
         onControlModeChange?.invoke(manualMode)
         requestFrame()
